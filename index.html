@@ -580,9 +580,33 @@
         driveAccessToken = resp.access_token;
         driveTokenExpiresAt = Date.now() + ((resp.expires_in||3600)*1000) - 60000;
         driveConnected = true;
+        try{ localStorage.setItem(DRIVE_EVER_CONNECTED_KEY, '1'); }catch(e){}
         setDriveStatus('connected', 'Drive: connected');
       }
     });
+    attemptSilentDriveReconnect();
+  }
+
+  // If you've connected Drive successfully at least once before, quietly try
+  // to reconnect in the background on every page load — no popup, no
+  // "Connect Drive" click needed — as long as you're still signed into
+  // Google in this browser. If it can't (signed out, expired, whatever), it
+  // just stays disconnected without any alarming error message; nothing you
+  // type locally is ever affected either way.
+  function attemptSilentDriveReconnect(){
+    let everConnected = false;
+    try{ everConnected = localStorage.getItem(DRIVE_EVER_CONNECTED_KEY) === '1'; }catch(e){}
+    if(!everConnected || !driveTokenClient) return;
+    const prevCallback = driveTokenClient.callback;
+    driveTokenClient.callback = (resp) => {
+      driveTokenClient.callback = prevCallback;
+      if(resp.error) return; // quietly stay disconnected — no error UI on a background attempt
+      driveAccessToken = resp.access_token;
+      driveTokenExpiresAt = Date.now() + ((resp.expires_in||3600)*1000) - 60000;
+      driveConnected = true;
+      setDriveStatus('connected', 'Drive: connected');
+    };
+    driveTokenClient.requestAccessToken({prompt:''});
   }
 
 
@@ -614,6 +638,7 @@
         driveAccessToken = resp.access_token;
         driveTokenExpiresAt = Date.now() + ((resp.expires_in||3600)*1000) - 60000;
         driveConnected = true;
+        try{ localStorage.setItem(DRIVE_EVER_CONNECTED_KEY, '1'); }catch(e){}
         setDriveStatus('connected', 'Drive: connected');
         resolve(true);
       };
