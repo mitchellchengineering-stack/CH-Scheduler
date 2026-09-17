@@ -193,6 +193,7 @@
   .customer-price{font-weight:800;color:var(--green);}
   .cell-dash{color:var(--line-strong);}
   .quote-pdf-flag{color:var(--ink-soft);font-size:11.5px;margin-top:3px;}
+  .extra-notes{color:var(--ink-soft);font-size:12px;margin-top:3px;white-space:pre-wrap;}
 
   .tabs{display:flex;gap:4px;margin-bottom:20px;border-bottom:1px solid var(--line);}
   .tab{
@@ -579,33 +580,9 @@
         driveAccessToken = resp.access_token;
         driveTokenExpiresAt = Date.now() + ((resp.expires_in||3600)*1000) - 60000;
         driveConnected = true;
-        try{ localStorage.setItem(DRIVE_EVER_CONNECTED_KEY, '1'); }catch(e){}
         setDriveStatus('connected', 'Drive: connected');
       }
     });
-    attemptSilentDriveReconnect();
-  }
-
-  // If you've connected Drive successfully at least once before, quietly try
-  // to reconnect in the background on every page load — no popup, no
-  // "Connect Drive" click needed — as long as you're still signed into
-  // Google in this browser. If it can't (signed out, expired, whatever),
-  // it just stays disconnected without any alarming error message; nothing
-  // you type locally is ever affected either way.
-  function attemptSilentDriveReconnect(){
-    let everConnected = false;
-    try{ everConnected = localStorage.getItem(DRIVE_EVER_CONNECTED_KEY) === '1'; }catch(e){}
-    if(!everConnected || !driveTokenClient) return;
-    const prevCallback = driveTokenClient.callback;
-    driveTokenClient.callback = (resp) => {
-      driveTokenClient.callback = prevCallback;
-      if(resp.error) return; // quietly stay disconnected — no error UI on a background attempt
-      driveAccessToken = resp.access_token;
-      driveTokenExpiresAt = Date.now() + ((resp.expires_in||3600)*1000) - 60000;
-      driveConnected = true;
-      setDriveStatus('connected', 'Drive: connected');
-    };
-    driveTokenClient.requestAccessToken({prompt:''});
   }
 
 
@@ -637,7 +614,6 @@
         driveAccessToken = resp.access_token;
         driveTokenExpiresAt = Date.now() + ((resp.expires_in||3600)*1000) - 60000;
         driveConnected = true;
-        try{ localStorage.setItem(DRIVE_EVER_CONNECTED_KEY, '1'); }catch(e){}
         setDriveStatus('connected', 'Drive: connected');
         resolve(true);
       };
@@ -719,6 +695,57 @@
     return res.json();
   }
 
+  async function sheetsMetaFetch(spreadsheetId){
+    const res = await fetch('https://sheets.googleapis.com/v4/spreadsheets/'+spreadsheetId+'?fields=sheets.properties', {
+      headers:{Authorization:'Bearer '+driveAccessToken}
+    });
+    if(!res.ok) throw new Error('Could not read spreadsheet tabs ('+res.status+')');
+    return res.json();
+  }
+
+  async function sheetsBatchUpdate(spreadsheetId, requests){
+    const res = await fetch('https://sheets.googleapis.com/v4/spreadsheets/'+spreadsheetId+':batchUpdate', {
+      method:'POST',
+      headers:{Authorization:'Bearer '+driveAccessToken, 'Content-Type':'application/json'},
+      body: JSON.stringify({requests})
+    });
+    if(!res.ok) throw new Error('Could not update spreadsheet tabs ('+res.status+')');
+    return res.json();
+  }
+
+  // Makes sure a sheet (tab) with this name exists in the spreadsheet,
+  // creating it if needed. Spreadsheets made before a given tab existed
+  // (e.g. from before Extras/Timeline syncing was added) just get the new
+  // tab added on first use — nothing about the existing tabs is disturbed.
+  // The very first tab ever created on a spreadsheet is Google's own
+  // default "Sheet1"; we reuse that one for Quotes rather than leaving an
+  // empty orphaned tab sitting next to it.
+  async function ensureSheetTab(spreadsheetId, tabName){
+    const meta = await sheetsMetaFetch(spreadsheetId);
+    const sheets = (meta.sheets||[]).map(s=>s.properties);
+    const existing = sheets.find(s=>s.title===tabName);
+    if(existing) return existing.sheetId;
+    if(tabName === 'Quotes'){
+      const defaultSheet = sheets.find(s=>s.title==='Sheet1');
+      if(defaultSheet){
+        await sheetsBatchUpdate(spreadsheetId, [{updateSheetProperties:{properties:{sheetId:defaultSheet.sheetId, title:'Quotes'}, fields:'title'}}]);
+        return defaultSheet.sheetId;
+      }
+    }
+    const res = await sheetsBatchUpdate(spreadsheetId, [{addSheet:{properties:{title:tabName}}}]);
+    return res.replies[0].addSheet.properties.sheetId;
+  }
+
+  async function sheetsWriteValues(spreadsheetId, tabName, values){
+    await ensureSheetTab(spreadsheetId, tabName);
+    const range = encodeURIComponent(tabName+'!A1');
+    await fetch('https://sheets.googleapis.com/v4/spreadsheets/'+spreadsheetId+'/values/'+range+'?valueInputOption=RAW', {
+      method:'PUT',
+      headers:{Authorization:'Bearer '+driveAccessToken, 'Content-Type':'application/json'},
+      body: JSON.stringify({range:tabName+'!A1', majorDimension:'ROWS', values})
+    });
+  }
+
   async function driveMoveFileToFolder(fileId, folderId){
     const meta = await driveFetch('https://www.googleapis.com/drive/v3/files/'+fileId+'?fields=parents');
     const prevParents = (meta.parents||[]).join(',');
@@ -735,18 +762,49 @@
     return [header].concat(rows);
   }
 
+  function extraSheetValues(job){
+    const header = ['Description','Notes','Cost to us (NZD)','Margin %','Charge customer (NZD)'];
+    const rows = (job.extras||[]).map(x=>{
+      const margin = quoteMargin(x);
+      const customer = extraCustomerPrice(x);
+      return [x.description||'', x.notes||'', Number(x.amount)||0, margin, customer];
+    });
+    return [header].concat(rows);
+  }
+
+  function timelineSheetValues(job){
+    const header = ['Trade','Description','Start date','End date','Status'];
+    const rows = (job.timeline||[]).slice().sort((a,b)=>(a.start||'').localeCompare(b.start||'')).map(t=>{
+      return [t.trade||'', t.description||'', t.start||'', t.end||'', t.status||''];
+    });
+    return [header].concat(rows);
+  }
+
   async function pushQuotesToSheet(job){
     if(!job.driveSheetId || !driveConnected) return;
     try{
       const ok = await ensureDriveToken();
       if(!ok) return;
-      const values = quoteSheetValues(job);
-      await fetch('https://sheets.googleapis.com/v4/spreadsheets/'+job.driveSheetId+'/values/A1?valueInputOption=RAW', {
-        method:'PUT',
-        headers:{Authorization:'Bearer '+driveAccessToken, 'Content-Type':'application/json'},
-        body: JSON.stringify({range:'A1', majorDimension:'ROWS', values})
-      });
+      await sheetsWriteValues(job.driveSheetId, 'Quotes', quoteSheetValues(job));
     }catch(e){ console.error('Sheet sync failed', e); }
+  }
+
+  async function pushExtrasToSheet(job){
+    if(!job.driveSheetId || !driveConnected) return;
+    try{
+      const ok = await ensureDriveToken();
+      if(!ok) return;
+      await sheetsWriteValues(job.driveSheetId, 'Extras', extraSheetValues(job));
+    }catch(e){ console.error('Extras sheet sync failed', e); }
+  }
+
+  async function pushTimelineToSheet(job){
+    if(!job.driveSheetId || !driveConnected) return;
+    try{
+      const ok = await ensureDriveToken();
+      if(!ok) return;
+      await sheetsWriteValues(job.driveSheetId, 'Timeline', timelineSheetValues(job));
+    }catch(e){ console.error('Timeline sheet sync failed', e); }
   }
 
   async function createDriveStructureForJob(job){
@@ -762,15 +820,25 @@
       const jobFolder = await driveFindOrCreateChildFolder(job.name || 'Untitled job', rootId);
       const quotesFolder = await driveFindOrCreateChildFolder('Quotes', jobFolder.id);
       const plansFolder = await driveFindOrCreateChildFolder('Plans', jobFolder.id);
-      const sheet = await sheetsCreate(job.name+' — Quotes');
-      await driveMoveFileToFolder(sheet.spreadsheetId, jobFolder.id);
+      const extrasFolder = await driveFindOrCreateChildFolder('Extras', jobFolder.id);
+      let sheetId = job.driveSheetId;
+      let sheetUrl = job.driveSheetUrl;
+      if(!sheetId){
+        const sheet = await sheetsCreate(job.name+' — Quotes & Extras');
+        await driveMoveFileToFolder(sheet.spreadsheetId, jobFolder.id);
+        sheetId = sheet.spreadsheetId;
+        sheetUrl = 'https://docs.google.com/spreadsheets/d/'+sheetId+'/edit';
+      }
       job.driveFolderId = jobFolder.id;
       job.driveQuotesFolderId = quotesFolder.id;
       job.drivePlansFolderId = plansFolder.id;
-      job.driveSheetId = sheet.spreadsheetId;
+      job.driveExtrasFolderId = extrasFolder.id;
+      job.driveSheetId = sheetId;
       job.driveFolderUrl = 'https://drive.google.com/drive/folders/'+jobFolder.id;
-      job.driveSheetUrl = 'https://docs.google.com/spreadsheets/d/'+sheet.spreadsheetId+'/edit';
+      job.driveSheetUrl = sheetUrl;
       await pushQuotesToSheet(job);
+      await pushExtrasToSheet(job);
+      await pushTimelineToSheet(job);
       await saveJob(job);
       setDriveStatus('connected', 'Drive: connected');
       renderMain();
@@ -789,6 +857,10 @@
     if(!q || q.status!=='Approved') return null;
     const amt = Number(q.amount)||0;
     return amt + amt*(quoteMargin(q)/100);
+  }
+  function extraCustomerPrice(x){
+    const amt = Number(x && x.amount)||0;
+    return amt + amt*(quoteMargin(x)/100);
   }
   function getEntryCost(job, entry){
     // Prefer an explicitly linked quote, fall back to matching by trade name (legacy data)
@@ -981,6 +1053,7 @@
       '<div class="tabs">'+
         tabHtml('overview','Overview')+
         tabHtml('quotes','Quotes')+
+        tabHtml('extras','Extras')+
         tabHtml('timeline','Timeline')+
       '</div>'+
       '<div id="tabContent"></div>';
@@ -1005,6 +1078,7 @@
     const tc = document.getElementById('tabContent');
     if(activeTab === 'overview') renderOverviewTab(tc, job);
     else if(activeTab === 'quotes') renderQuotesTab(tc, job);
+    else if(activeTab === 'extras') renderExtrasTab(tc, job);
     else renderTimelineTab(tc, job);
   }
 
@@ -1199,6 +1273,167 @@
     });
   }
 
+  // ---------------- Extras (to charge customer) ----------------
+  function renderExtrasTab(container, job){
+    const extras = job.extras||[];
+    const total = extras.reduce((s,x)=>s+(Number(x.amount)||0),0);
+    const customerTotal = extras.reduce((s,x)=>s+extraCustomerPrice(x),0);
+
+    let rows = '';
+    if(extras.length === 0){
+      rows = '<tr><td colspan="6"><div class="panel-empty"><strong>No extras yet</strong>Keep track of anything the customer has asked to add on — attach the PDF or screenshot of what they asked for, and price it up here.</div></td></tr>';
+    } else {
+      extras.forEach(x=>{
+        const cust = extraCustomerPrice(x);
+        rows += '<tr>'+
+          '<td>'+esc(x.description)+(x.notes ? '<div class="extra-notes">'+esc(x.notes)+'</div>' : '')+
+            (x.pdfData ? '<div class="quote-pdf-flag">'+(isImageFile(x.pdfName)?'🖼️ ':'📎 ')+esc(x.pdfName||'Attachment')+'</div>' : '')+'</td>'+
+          '<td class="num-cell">'+money(x.amount)+'</td>'+
+          '<td class="margin-cell"><input class="margin-input" type="number" step="0.1" min="0" data-margin="'+x.id+'" value="'+(x.margin!==undefined&&x.margin!==null?x.margin:'')+'" placeholder="'+DEFAULT_MARGIN+'"><span class="unit">%</span></td>'+
+          '<td class="num-cell"><span class="customer-price">'+money(cust)+'</span></td>'+
+          '<td><div class="row-actions">'+
+            (x.pdfData ? '<button class="icon-btn" data-view-pdf="'+x.id+'">'+(isImageFile(x.pdfName)?'View image':'View PDF')+'</button>' : '')+
+            '<button class="icon-btn" data-edit="'+x.id+'">Edit</button>'+
+            '<button class="icon-btn" data-del="'+x.id+'">Remove</button>'+
+          '</div></td>'+
+        '</tr>';
+      });
+    }
+    container.innerHTML =
+      '<div class="panel">'+
+        '<div class="panel-head"><h3>Extras to charge customer</h3><button class="btn btn-primary btn-sm" id="addExtraBtn">+ Add extra</button></div>'+
+        '<table><thead><tr><th>Description &amp; notes</th><th class="num-th">Cost to us</th><th class="num-th">Margin</th><th class="num-th">Charge customer</th><th></th></tr></thead>'+
+        '<tbody>'+rows+
+        (extras.length ? '<tr class="total-row"><td>Total</td><td class="num-cell">'+money(total)+'</td><td></td><td class="num-cell">'+money(customerTotal)+'</td><td></td></tr>' : '')+
+        '</tbody></table>'+
+        '<div class="field-hint" style="margin-top:10px;">Margin defaults to '+DEFAULT_MARGIN+'% like your trade quotes. Attach whatever the customer sent you — a PDF, an email screenshot, a photo of a sketch — so you can always find it again.</div>'+
+      '</div>';
+
+    document.getElementById('addExtraBtn').addEventListener('click', ()=>openExtraModal(job, null));
+    container.querySelectorAll('[data-view-pdf]').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        const x = extras.find(v=>v.id===btn.getAttribute('data-view-pdf'));
+        if(x && x.pdfData) openPdfDataUri(x.pdfData, x.pdfName);
+      });
+    });
+    container.querySelectorAll('[data-edit]').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        const x = extras.find(v=>v.id===btn.getAttribute('data-edit'));
+        openExtraModal(job, x);
+      });
+    });
+    container.querySelectorAll('[data-del]').forEach(btn=>{
+      btn.addEventListener('click', async ()=>{
+        if(!confirm('Remove this extra?')) return;
+        job.extras = job.extras.filter(v=>v.id!==btn.getAttribute('data-del'));
+        await saveJob(job);
+        renderMain();
+        if(job.driveSheetId) pushExtrasToSheet(job);
+      });
+    });
+    container.querySelectorAll('[data-margin]').forEach(input=>{
+      input.addEventListener('change', async ()=>{
+        const x = extras.find(v=>v.id===input.getAttribute('data-margin'));
+        if(!x) return;
+        x.margin = input.value===''? null : parseFloat(input.value);
+        await saveJob(job);
+        renderMain();
+        if(job.driveSheetId) pushExtrasToSheet(job);
+      });
+    });
+  }
+
+  function openExtraModal(job, item){
+    const isEdit = !!item;
+    openModal(
+      '<div class="modal-head"><h3>'+(isEdit?'Edit extra':'Add extra')+'</h3><button class="modal-close" id="mClose">&times;</button></div>'+
+      '<div class="modal-body">'+
+        '<div class="field"><label>What\'s the extra?</label><input id="xDesc" type="text" value="'+esc(item?item.description:'')+'" placeholder="e.g. Extra power point in garage"></div>'+
+        '<div class="field"><label>Notes</label><textarea id="xNotes" placeholder="Anything worth remembering — who asked, when, details of what they want">'+esc(item?item.notes:'')+'</textarea></div>'+
+        '<div class="field-row">'+
+          '<div class="field"><label>Cost to us (NZD)</label><input id="xAmount" type="number" step="0.01" min="0" value="'+(item?item.amount:'')+'" placeholder="0.00"></div>'+
+          '<div class="field"><label>Margin override %</label><input id="xMargin" type="number" step="0.1" min="0" value="'+(item&&item.margin!==undefined&&item.margin!==null?item.margin:'')+'" placeholder="Default '+DEFAULT_MARGIN+'%"></div>'+
+        '</div>'+
+        '<div class="field"><label>PDF or screenshot of what they asked for</label>'+
+          '<div id="xPdfCurrent">'+(item&&item.pdfName ? (isImageFile(item.pdfName) ? '🖼️ ' : '📎 ')+'<strong>'+esc(item.pdfName)+'</strong> — <a href="#" id="xPdfView">View</a> · <a href="#" id="xPdfRemove">Remove</a>' : '')+'</div>'+
+          '<input id="xPdfFile" type="file" accept="application/pdf,image/*" style="margin-top:6px;">'+
+          '<div class="field-hint">A screenshot of the text/email asking for it works fine — you can pull it back up from this tab any time.</div>'+
+        '</div>'+
+      '</div>'+
+      '<div class="modal-foot"><button class="btn btn-secondary" id="mCancel">Cancel</button><button class="btn btn-primary" id="mSave">'+(isEdit?'Save changes':'Add extra')+'</button></div>'
+    );
+    let pdfRemoved = false;
+    document.getElementById('mClose').addEventListener('click', closeModal);
+    document.getElementById('mCancel').addEventListener('click', closeModal);
+    const pdfViewLink = document.getElementById('xPdfView');
+    if(pdfViewLink){
+      pdfViewLink.addEventListener('click', (e)=>{
+        e.preventDefault();
+        if(item && item.pdfData) openPdfDataUri(item.pdfData, item.pdfName);
+      });
+    }
+    const pdfRemoveLink = document.getElementById('xPdfRemove');
+    if(pdfRemoveLink){
+      pdfRemoveLink.addEventListener('click', (e)=>{
+        e.preventDefault();
+        pdfRemoved = true;
+        document.getElementById('xPdfCurrent').innerHTML = '<span class="field-hint">Attachment will be removed when you save.</span>';
+      });
+    }
+    document.getElementById('mSave').addEventListener('click', async ()=>{
+      const description = document.getElementById('xDesc').value.trim();
+      if(!description){ document.getElementById('xDesc').focus(); return; }
+      const data = {
+        description,
+        notes: document.getElementById('xNotes').value.trim(),
+        amount: parseFloat(document.getElementById('xAmount').value)||0,
+        margin: document.getElementById('xMargin').value===''? null : parseFloat(document.getElementById('xMargin').value)
+      };
+      const fileInput = document.getElementById('xPdfFile');
+      const file = fileInput.files && fileInput.files[0];
+      if(file){
+        const isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name);
+        const isImg = (file.type||'').indexOf('image/') === 0 || isImageFile(file.name);
+        if(!isPdf && !isImg){
+          alert('Please choose a PDF or an image file (JPG, PNG, etc).');
+          return;
+        }
+        try{
+          data.pdfData = await readFileAsDataURL(file);
+          data.pdfName = file.name;
+        }catch(e){
+          alert('Could not read that file — please try again.');
+          return;
+        }
+      } else if(pdfRemoved){
+        data.pdfData = null;
+        data.pdfName = null;
+      }
+      job.extras = job.extras || [];
+      if(isEdit){ Object.assign(item, data); }
+      else { data.id = uid(); job.extras.push(data); }
+      await saveJob(job);
+      closeModal();
+      renderMain();
+      if(job.driveSheetId) pushExtrasToSheet(job);
+      if(file && driveConnected){
+        ensureDriveToken().then(async ok=>{
+          if(!ok) return;
+          if(!job.driveExtrasFolderId && job.driveFolderId){
+            try{
+              const folder = await driveFindOrCreateChildFolder('Extras', job.driveFolderId);
+              job.driveExtrasFolderId = folder.id;
+              await saveJob(job);
+            }catch(e){ console.error('Could not set up Extras folder', e); return; }
+          }
+          if(job.driveExtrasFolderId){
+            driveUploadFile(data.pdfData, data.pdfName, job.driveExtrasFolderId).catch(e=>console.error('Extra file upload failed', e));
+          }
+        });
+      }
+    });
+  }
+
   // ---------------- Timeline ----------------
   const DAY_WIDTH = 42; // px per day column
   const DAY_MS = 24*60*60*1000;
@@ -1376,6 +1611,7 @@
         job.timeline = job.timeline.filter(x=>x.id!==el.getAttribute('data-del2'));
         await saveJob(job);
         renderMain();
+        if(job.driveSheetId) pushTimelineToSheet(job);
       });
     });
   }
@@ -1747,6 +1983,7 @@
       await saveJob(job);
       closeModal();
       renderMain();
+      if(job.driveSheetId) pushTimelineToSheet(job);
     });
   }
 
