@@ -371,6 +371,53 @@
   ::-webkit-scrollbar-thumb{background:#C6C9CC;border-radius:6px;border:2px solid var(--bg);}
   ::-webkit-scrollbar-track{background:var(--bg);}
 
+  /* ---------- Splash screen ---------- */
+  #splash{
+    position:fixed;inset:0;z-index:10000;background:#0B0C0C;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    transition:opacity .6s ease, visibility .6s ease;cursor:pointer;
+  }
+  #splash.hide{opacity:0;visibility:hidden;}
+  .splash-badge{
+    position:relative;overflow:hidden;background:#fff;padding:18px 30px;border-radius:8px;line-height:0;
+    opacity:0;transform:scale(.8);
+    animation:splashLogoIn .8s cubic-bezier(.2,.8,.2,1) .2s forwards;
+  }
+  .splash-badge img{width:min(300px,70vw);height:auto;display:block;}
+  .splash-badge::after{
+    content:'';position:absolute;top:0;bottom:0;left:-60%;width:40%;
+    background:linear-gradient(100deg,transparent,rgba(254,227,0,.55),transparent);
+    transform:skewX(-20deg);
+    animation:splashShine .9s ease 1s forwards;
+  }
+  .splash-bar{
+    height:4px;width:0;background:var(--yellow);margin-top:26px;border-radius:2px;
+    animation:splashBar .9s ease .9s forwards;
+  }
+  .splash-title{
+    color:#9a9c9c;font-size:12px;letter-spacing:.2em;text-transform:uppercase;margin-top:16px;
+    opacity:0;animation:splashFade .6s ease 1.4s forwards;
+  }
+  @keyframes splashLogoIn{to{opacity:1;transform:scale(1);}}
+  @keyframes splashShine{to{left:140%;}}
+  @keyframes splashBar{to{width:min(300px,70vw);}}
+  @keyframes splashFade{to{opacity:1;}}
+
+  /* ---------- Login watermark ---------- */
+  .login-watermark{
+    position:absolute;inset:0;pointer-events:none;
+    background-repeat:no-repeat;background-position:center;background-size:min(720px,85vw) auto;
+    opacity:.07;
+  }
+  .login-card{position:relative;z-index:1;}
+  .login-gate.login-enter .login-card{animation:cardIn .7s ease both;}
+  @keyframes cardIn{from{opacity:0;transform:translateY(16px);}to{opacity:1;transform:none;}}
+
+  @media (prefers-reduced-motion:reduce){
+    .splash-badge,.splash-bar,.splash-title{animation-duration:.01s;animation-delay:0s;}
+    .splash-badge::after{display:none;}
+  }
+
   @media (max-width:760px){
     .sidebar{width:210px;}
     .main{padding:20px 16px 60px;}
@@ -380,7 +427,13 @@
 </style>
 </head>
 <body>
+<div id="splash">
+  <div class="splash-badge"><img id="splashLogo" alt="CH Engineering"></div>
+  <div class="splash-bar"></div>
+  <div class="splash-title">Build Scheduler</div>
+</div>
 <div id="loginGate" class="login-gate">
+  <div class="login-watermark" id="loginWatermark"></div>
   <div class="login-card">
     <img class="login-logo" src="" alt="" id="loginLogo">
     <h2>CH Engineering — Build Scheduler</h2>
@@ -604,7 +657,10 @@
     document.getElementById('loginGate').style.display = 'flex';
     document.getElementById('app').style.display = 'none';
     if(statusText !== undefined) document.getElementById('loginStatus').textContent = statusText;
-    if(LOGO_DATA_URI){ document.getElementById('loginLogo').src = LOGO_DATA_URI; }
+    if(LOGO_DATA_URI){
+      document.getElementById('loginLogo').src = LOGO_DATA_URI;
+      document.getElementById('loginWatermark').style.backgroundImage = 'url('+LOGO_DATA_URI+')';
+    }
   }
   function hideLoginGate(){
     document.getElementById('loginGate').style.display = 'none';
@@ -2409,6 +2465,23 @@
   document.getElementById('signOutBtn').addEventListener('click', signOutOfApp);
 
   wireLoginGate();
+
+  // Splash: show the logo animation, then fade through to the login page
+  (function runSplash(){
+    const splash = document.getElementById('splash');
+    if(!splash) return;
+    if(LOGO_DATA_URI) document.getElementById('splashLogo').src = LOGO_DATA_URI;
+    let done = false;
+    function finish(){
+      if(done) return;
+      done = true;
+      splash.classList.add('hide');
+      document.getElementById('loginGate').classList.add('login-enter');
+      setTimeout(()=>splash.remove(), 700);
+    }
+    setTimeout(finish, 2600);
+    splash.addEventListener('click', finish);
+  })();
 })();
 </script>
 </body>
