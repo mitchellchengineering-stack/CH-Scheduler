@@ -165,7 +165,7 @@
   .sidebar-empty{padding:20px 16px;color:var(--ink-soft);font-size:12.5px;}
 
   .main{flex:1;min-width:0;overflow-y:auto;padding:26px 32px 60px;}
-  .main-inner{max-width:980px;margin:0 auto;}
+  .main-inner{max-width:1800px;margin:0 auto;}
 
   .welcome{
     max-width:520px;margin:60px auto;text-align:center;color:var(--ink-soft);
@@ -237,7 +237,7 @@
   .plan-item:last-child{border-bottom:none;}
   .plan-item-left{display:flex;align-items:center;gap:10px;min-width:0;}
   .plan-icon{font-size:18px;flex:0 0 auto;}
-  .plan-name{font-weight:600;font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:420px;cursor:pointer;}
+  .plan-name{font-weight:600;font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:760px;cursor:pointer;}
   .plan-name:hover{text-decoration:underline;color:var(--blue);}
   .plan-meta{font-size:11.5px;color:var(--ink-soft);margin-top:1px;}
 
@@ -340,7 +340,7 @@
   td.inv-discount,td.inv-discount *{color:var(--green);} td.inv-discount{background:var(--green-bg);}
   td.inv-partial{background:#FFF3B0;} td.inv-partial,td.inv-partial *{color:#5A4F00;}
   td.inv-match .inv-tick{color:var(--green);font-weight:800;}
-  .inv-note{font-size:11px;font-weight:600;white-space:normal;max-width:190px;margin-left:auto;}
+  .inv-note{font-size:11px;font-weight:600;white-space:normal;max-width:340px;margin-left:auto;}
   tr.extra-charged td{background:var(--green-bg);}
   .dl-wrap{position:relative;display:inline-block;}
   .dl-menu{display:none;position:absolute;right:0;top:100%;margin-top:4px;background:var(--panel);border:1px solid var(--line-strong);border-radius:4px;box-shadow:0 8px 20px rgba(0,0,0,0.15);z-index:60;min-width:230px;overflow:hidden;}
@@ -360,7 +360,7 @@
   .tl-left{display:flex;gap:12px;align-items:flex-start;}
   .tl-swatch{width:9px;height:9px;border-radius:2px;margin-top:5px;flex:0 0 auto;}
   .tl-trade{font-weight:700;font-size:13.5px;}
-  .tl-desc{font-size:12.5px;color:var(--ink-soft);margin-top:2px;max-width:480px;}
+  .tl-desc{font-size:12.5px;color:var(--ink-soft);margin-top:2px;max-width:900px;}
   .tl-dates{font-size:12px;color:var(--ink-soft);margin-top:3px;}
 
   /* ---------- Modal ---------- */
@@ -907,15 +907,34 @@
       });
       el.querySelectorAll('[data-remove-crew]').forEach(btn=>{
         btn.addEventListener('click', async ()=>{
-          if(!confirm('Remove this person\'s access? They won\'t be able to sign in anymore.')) return;
-          try{ await db.collection('roles').doc(btn.getAttribute('data-remove-crew')).delete(); }
-          catch(e){ alert('Could not remove them: '+(e&&e.message?e.message:e)); }
+          const rid = btn.getAttribute('data-remove-crew');
+          let rd = {};
+          try{ rd = (await db.collection('roles').doc(rid).get()).data() || {}; }catch(e){}
+          if(isOwnerEmail(rd.email)){ alert('The owner can\'t be removed.'); return; }
+          if(!confirm('Are you sure you want to delete '+(rd.name||'this person')+'?\n\nTheir account and sign-in will be deleted completely and they won\'t be able to sign in. This can\'t be undone.')) return;
+          let authGone = false;
+          if(rd.name && rd.code) authGone = await deleteCrewAuthAccount(rd.name, rd.code);
+          try{ await db.collection('roles').doc(rid).delete(); }
+          catch(e){ alert('Could not remove them: '+(e&&e.message?e.message:e)); renderCrewList(); return; }
+          if(!authGone) alert((rd.name||'They')+' no longer has access, but their sign-in account was created before codes were stored, so it couldn\'t be wiped automatically.\n\nTo clear it completely: Firebase console > Authentication > Users > delete '+crewEmailFor(rd.name||'')+'.');
           renderCrewList();
         });
       });
     }catch(e){
       el.innerHTML = '<div class="field-hint">Could not load crew list: '+(e&&e.message?e.message:e)+'</div>';
     }
+  }
+
+  // Wipe a crew member's sign-in account itself (not just their role) by
+  // signing in as them briefly on a separate app instance and deleting it.
+  async function deleteCrewAuthAccount(name, code){
+    const app2 = firebase.initializeApp(firebaseConfig, 'crewDelete-'+Date.now());
+    try{
+      const cred = await app2.auth().signInWithEmailAndPassword(crewEmailFor(name), code);
+      await cred.user.delete();
+      return true;
+    }catch(e){ console.error('Could not delete crew sign-in', e); return false; }
+    finally{ app2.delete().catch(()=>{}); }
   }
 
   async function addCrewMember(){
@@ -932,18 +951,27 @@
     const secondaryName = 'crewCreator-'+Date.now();
     const secondaryApp = firebase.initializeApp(firebaseConfig, secondaryName);
     try{
-      const cred = await secondaryApp.auth().createUserWithEmailAndPassword(crewEmailFor(name), code);
-      const newUid = cred.user.uid;
+      let newUid;
+      try{
+        const cred = await secondaryApp.auth().createUserWithEmailAndPassword(crewEmailFor(name), code);
+        newUid = cred.user.uid;
+      }catch(e1){
+        // a leftover sign-in from an earlier delete: take it over if the code matches
+        if(e1 && e1.code === 'auth/email-already-in-use'){
+          const cred = await secondaryApp.auth().signInWithEmailAndPassword(crewEmailFor(name), code);
+          newUid = cred.user.uid;
+        } else throw e1;
+      }
       await secondaryApp.auth().signOut();
       await db.collection('roles').doc(newUid).set({
-        role, name, createdAt: firebase.firestore.FieldValue.serverTimestamp()
+        role, name, code, createdAt: firebase.firestore.FieldValue.serverTimestamp()
       });
       document.getElementById('newCrewName').value = '';
       document.getElementById('newCrewCode').value = '';
       renderCrewList();
     }catch(e){
-      if(e && e.code === 'auth/email-already-in-use'){
-        errEl.textContent = 'Someone with this exact name already has an account — use a different name, or ask them to sign in directly.';
+      if(e && (e.code === 'auth/wrong-password' || e.code === 'auth/invalid-credential' || e.code === 'auth/invalid-login-credentials' || e.code === 'auth/email-already-in-use')){
+        errEl.textContent = 'A leftover sign-in for "'+name+'" from an earlier delete still exists with a different code. Use the code they had before, or delete '+crewEmailFor(name)+' under Firebase console > Authentication > Users, then add them again.';
       } else {
         errEl.textContent = 'Could not add them: '+(e&&e.message?e.message:e);
       }
@@ -1204,6 +1232,10 @@
 
   async function sheetsWriteValues(spreadsheetId, tabName, values){
     await ensureSheetTab(spreadsheetId, tabName);
+    // wipe old rows first so deleted items don't linger underneath
+    await fetch('https://sheets.googleapis.com/v4/spreadsheets/'+spreadsheetId+'/values/'+encodeURIComponent(tabName)+':clear', {
+      method:'POST', headers:{Authorization:'Bearer '+driveAccessToken, 'Content-Type':'application/json'}, body:'{}'
+    });
     const range = encodeURIComponent(tabName+'!A1');
     await fetch('https://sheets.googleapis.com/v4/spreadsheets/'+spreadsheetId+'/values/'+range+'?valueInputOption=RAW', {
       method:'PUT',
@@ -1219,21 +1251,22 @@
   }
 
   function quoteSheetValues(job){
-    const header = ['Description','Company','Contact','Phone','Email','Quoted amount (NZD)','Margin %','Price to customer','Status'];
+    const header = ['Description','Company','Contact','Phone','Email','Quoted amount (NZD)','Margin %','Price to customer','Status','Invoiced (NZD)','Invoice check','Invoice reason'];
     const rows = (job.quotes||[]).map(q=>{
       const margin = quoteMargin(q);
       const customer = q.amount ? Number(q.amount) * (1 + margin/100) : '';
-      return [q.description||'', q.trade||'', q.contactName||'', q.phone||'', q.email||'', Number(q.amount)||0, margin, customer, q.status||''];
+      return [q.description||'', q.trade||'', q.contactName||'', q.phone||'', q.email||'', Number(q.amount)||0, margin, customer, q.status||'',
+        (q.invoiced!=null&&q.invoiced!=='')?Number(q.invoiced):'', (invoiceState(q)||{}).label||'', q.invoiceReason||''];
     });
     return [header].concat(rows);
   }
 
   function extraSheetValues(job){
-    const header = ['Description','Notes','Cost to us (NZD)','Margin %','Charge customer (NZD)'];
+    const header = ['Description','Notes','Cost to us (NZD)','Margin %','Charge customer (NZD)','Charged?'];
     const rows = (job.extras||[]).map(x=>{
       const margin = quoteMargin(x);
       const customer = extraCustomerPrice(x);
-      return [x.description||'', x.notes||'', Number(x.amount)||0, margin, customer];
+      return [x.description||'', x.notes||'', Number(x.amount)||0, margin, customer, x.charged?'Charged':'Not yet'];
     });
     return [header].concat(rows);
   }
@@ -1328,8 +1361,8 @@
     if(!q || q.invoiced===undefined || q.invoiced===null || q.invoiced==='') return null;
     const diff = Math.round((Number(q.invoiced)-(Number(q.amount)||0))*100)/100;
     if(diff === 0) return {cls:'inv-match', label:'Matches quote', diff, rgb:null};
-    if(diff > 0) return {cls:'inv-over', label:'Invoiced MORE than quoted', diff, rgb:[251,234,232]};
-    if(q.invoiceType === 'discount') return {cls:'inv-discount', label:'Discount received', diff, rgb:[233,244,238]};
+    if(diff > 0) return {cls:'inv-over', label:'Higher than quoted', diff, rgb:[251,234,232]};
+    if(q.invoiceType === 'discount') return {cls:'inv-discount', label:'Got a deal', diff, rgb:[233,244,238]};
     if(q.invoiceType === 'partial') return {cls:'inv-partial', label:'Not fully invoiced yet', diff, rgb:[255,243,176]};
     return {cls:'inv-over', label:'Under quote - no reason given', diff, rgb:[251,234,232]};
   }
@@ -1438,6 +1471,7 @@
       let touched = false;
       snap.docChanges().forEach(c=>{
         if(c.doc.metadata.hasPendingWrites) return;
+        if(c.type === 'modified') scheduleSheetSync(c.doc.id);
         delete jobs[c.doc.id];
         if(c.doc.id === currentJobId) touched = true;
       });
@@ -1455,6 +1489,7 @@
       unsubFin = db.collection(FINANCE_COLL).onSnapshot(snap=>{
         snap.docChanges().forEach(c=>{
           if(c.doc.metadata.hasPendingWrites) return;
+          if(c.type === 'modified') scheduleSheetSync(c.doc.id);
           delete jobs[c.doc.id];
           if(!firstFin && c.doc.id === currentJobId && !document.getElementById('mSave')) renderMain();
         });
@@ -1520,6 +1555,34 @@
       }catch(e){ console.error('Could not stage upload', e); }
     }
   }
+  function driveIdFromUrl(u){
+    const m = /\/d\/([A-Za-z0-9_-]+)/.exec(u||'') || /[?&]id=([A-Za-z0-9_-]+)/.exec(u||'') || /\/folders\/([A-Za-z0-9_-]+)/.exec(u||'');
+    return m ? m[1] : null;
+  }
+  // Trash a Drive file/folder. The owner does it straight away; anyone else
+  // leaves a request that the owner's session carries out.
+  async function trashDriveFile(fileId){
+    if(!fileId) return;
+    if(isOwner() && driveConnected && await ensureDriveToken()){
+      try{ await driveFetch('https://www.googleapis.com/drive/v3/files/'+fileId, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({trashed:true})}); return; }
+      catch(e){ console.error('Drive trash failed', e); }
+    }
+    try{ await db.collection(QUEUE_COLL).doc(uid()).set({kind:'trash', fileId, status:'pending', by:(myRole&&myRole.name)||'', byUid:currentUser.uid, createdAt:firebase.firestore.FieldValue.serverTimestamp()}); }
+    catch(e){ console.error('Could not queue Drive delete', e); }
+  }
+  function trashDriveLink(v){ if(typeof v==='string' && /^https?:/i.test(v)) return trashDriveFile(driveIdFromUrl(v)); }
+  const sheetTimers = {};
+  function scheduleSheetSync(id){
+    if(!isOwner()) return;
+    clearTimeout(sheetTimers[id]);
+    sheetTimers[id] = setTimeout(async ()=>{
+      if(!driveConnected) return;
+      delete jobs[id];
+      const job = await loadJob(id);
+      if(!job || !job.driveSheetId) return;
+      await pushQuotesToSheet(job); await pushExtrasToSheet(job); await pushTimelineToSheet(job);
+    }, 4000);
+  }
   let queueBusy = false, unsubQueue = null, queueTimer = null;
   function startQueueWatcher(){
     if(!isOwner() || unsubQueue) return;
@@ -1545,13 +1608,17 @@
             tx.update(qd.ref, {status:'processing'}); return true;
           });
           if(!got) continue;
+          if(q.kind === 'trash'){
+            await driveFetch('https://www.googleapis.com/drive/v3/files/'+q.fileId, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({trashed:true})}).catch(e=>console.error('trash failed', e));
+            await qd.ref.delete(); continue;
+          }
           setDriveStatus('syncing', 'Drive: filing '+(q.name||'upload')+'…');
           const cs = await qd.ref.collection('chunks').get();
           const parts = cs.docs.map(d=>d.data()).sort((a,b)=>a.i-b.i);
           if(parts.length !== q.chunks) throw new Error('chunks incomplete');
           const dataUri = parts.map(p=>p.data).join('');
           const jobDoc = await db.collection('jobs').doc(q.jobId).get();
-          if(!jobDoc.exists){ await qd.ref.update({status:'failed'}); continue; }
+          if(!jobDoc.exists){ for(const c of cs.docs) await c.ref.delete(); await qd.ref.delete(); continue; }
           const job = Object.assign({}, jobDoc.data(), {id:q.jobId});
           await ensureJobFolders(job);
           await db.collection('jobs').doc(q.jobId).update({driveFolderId:job.driveFolderId, driveFolderUrl:job.driveFolderUrl,
@@ -1561,22 +1628,29 @@
           await driveFetch('https://www.googleapis.com/drive/v3/files/'+up.id+'/permissions', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({role:'reader', type:'anyone'})});
           const link = up.webViewLink || ('https://drive.google.com/file/d/'+up.id+'/view');
           const marker = 'pending:'+qd.id;
+          let found = false;
           if(q.kind === 'plan'){
             await db.runTransaction(async tx=>{
-              const r = db.collection('jobs').doc(q.jobId); const d = await tx.get(r);
-              const plans = (d.data().plans||[]).map(p=> p.id===q.itemId && p.fileData===marker ? Object.assign({}, p, {fileData:link}) : p);
-              tx.update(r, {plans});
+              const r = db.collection('jobs').doc(q.jobId); const d = await tx.get(r); let hit = false;
+              const plans = (d.data().plans||[]).map(p=>{ if(p.id===q.itemId && p.fileData===marker){ hit = true; return Object.assign({}, p, {fileData:link}); } return p; });
+              if(hit) tx.update(r, {plans}); found = hit;
             });
           } else if(q.kind === 'quote'){
             await db.runTransaction(async tx=>{
-              const r = db.collection(FINANCE_COLL).doc(q.jobId); const d = await tx.get(r);
-              if(!d.exists) return;
-              const quotes = (d.data().quotes||[]).map(x=> x.id===q.itemId && x.pdfData===marker ? Object.assign({}, x, {pdfData:link}) : x);
-              tx.update(r, {quotes});
+              const r = db.collection(FINANCE_COLL).doc(q.jobId); const d = await tx.get(r); let hit = false;
+              if(!d.exists){ found = false; return; }
+              const quotes = (d.data().quotes||[]).map(x=>{ if(x.id===q.itemId && x.pdfData===marker){ hit = true; return Object.assign({}, x, {pdfData:link}); } return x; });
+              if(hit) tx.update(r, {quotes}); found = hit;
             });
           } else {
-            await db.collection(FINANCE_COLL).doc(q.jobId).update({['extras.'+q.itemId+'.pdfData']: link});
+            await db.runTransaction(async tx=>{
+              const r = db.collection(FINANCE_COLL).doc(q.jobId); const d = await tx.get(r);
+              const ex = d.exists && d.data().extras && d.data().extras[q.itemId];
+              if(ex && ex.pdfData === marker){ tx.update(r, {['extras.'+q.itemId+'.pdfData']: link}); found = true; } else found = false;
+            });
           }
+          // the item was deleted while it waited — don't leave an orphan file in Drive
+          if(!found) await driveFetch('https://www.googleapis.com/drive/v3/files/'+up.id, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({trashed:true})}).catch(()=>{});
           delete jobs[q.jobId];
           for(const c of cs.docs) await c.ref.delete();
           await qd.ref.delete();
@@ -1932,8 +2006,11 @@
     });
     container.querySelectorAll('[data-del-plan]').forEach(btn=>{
       btn.addEventListener('click', async ()=>{
-        if(!confirm('Remove this plan file?')) return;
-        job.plans = (job.plans||[]).filter(x=>x.id!==btn.getAttribute('data-del-plan'));
+        const pl = (job.plans||[]).find(x=>x.id===btn.getAttribute('data-del-plan'));
+        if(!pl) return;
+        if(!confirm('Are you sure you want to delete the plan "'+(pl.name||'plan')+'"?\n\nIt will also be deleted from Google Drive. This can\'t be undone.')) return;
+        trashDriveLink(pl.fileData);
+        job.plans = (job.plans||[]).filter(x=>x.id!==pl.id);
         await saveJob(job);
         renderMain();
       });
@@ -2028,10 +2105,14 @@
     });
     container.querySelectorAll('[data-del]').forEach(btn=>{
       btn.addEventListener('click', async ()=>{
-        if(!confirm('Remove this quote?')) return;
-        job.quotes = job.quotes.filter(x=>x.id!==btn.getAttribute('data-del'));
+        const dq = job.quotes.find(x=>x.id===btn.getAttribute('data-del'));
+        if(!dq) return;
+        if(!confirm('Are you sure you want to delete the quote "'+(dq.description||'quote')+'"'+(dq.trade?' ('+dq.trade+')':'')+'?\n\nIt will also be removed from the Google Sheet and its attached file deleted from Drive. This can\'t be undone.')) return;
+        trashDriveLink(dq.pdfData);
+        job.quotes = job.quotes.filter(x=>x.id!==dq.id);
         await saveJob(job);
         renderMain();
+        if(job.driveSheetId) pushQuotesToSheet(job);
       });
     });
     container.querySelectorAll('[data-margin]').forEach(input=>{
@@ -2119,8 +2200,11 @@
     });
     container.querySelectorAll('[data-del]').forEach(btn=>{
       btn.addEventListener('click', async ()=>{
-        if(!confirm('Remove this extra?')) return;
-        job.extras = job.extras.filter(v=>v.id!==btn.getAttribute('data-del'));
+        const dx = job.extras.find(v=>v.id===btn.getAttribute('data-del'));
+        if(!dx) return;
+        if(!confirm('Are you sure you want to delete the extra "'+(dx.description||'extra')+'"?\n\nIt will also be removed from the Google Sheet and its attached file deleted from Drive. This can\'t be undone.')) return;
+        trashDriveLink(dx.pdfData);
+        job.extras = job.extras.filter(v=>v.id!==dx.id);
         await saveJob(job);
         renderMain();
         if(job.driveSheetId) pushExtrasToSheet(job);
@@ -2320,6 +2404,7 @@
       minD.setDate(minD.getDate()-1);
       maxD.setDate(maxD.getDate()+1);
       const totalDays = Math.max(1, Math.round((maxD-minD)/DAY_MS)+1);
+      const DAY_WIDTH = Math.max(42, Math.min(110, Math.floor(((container.clientWidth||0)-190-70)/totalDays)));
 
       let dayCellsHeader = '';
       let dayCellsGrid = '';
@@ -2440,6 +2525,7 @@
       el.addEventListener('click', async ()=>{
         const victim = job.timeline.find(x=>x.id===el.getAttribute('data-del2'));
         if(!victim) return;
+        if(!confirm('Are you sure you want to delete the trade "'+victim.trade+'" from the timeline?')) return;
         const why = (prompt('Why is "'+victim.trade+'" being removed from the timeline? (required)') || '').trim();
         if(!why){ alert('A reason is required to remove a trade from the timeline.'); return; }
         job.timelineRemoved = job.timelineRemoved || [];
@@ -2714,7 +2800,12 @@
   }
 
   async function deleteJob(job){
-    if(!confirm('Delete "'+job.name+'" and all its quotes and timeline entries? This can\'t be undone.')) return;
+    if(!confirm('Are you sure you want to delete the job "'+job.name+'"?\n\nThis permanently deletes its quotes, extras, plans and timeline, plus its Google Drive folder (with every file in it) and its spreadsheet. This can\'t be undone.')) return;
+    const doomed = new Set();
+    [job.driveFolderId, job.driveSheetId].forEach(i=>{ if(i) doomed.add(i); });
+    (job.plans||[]).forEach(p=>{ const i = /^https?:/i.test(p.fileData||'') && driveIdFromUrl(p.fileData); if(i) doomed.add(i); });
+    (job.quotes||[]).concat(job.extras||[]).forEach(x=>{ const i = /^https?:/i.test(x.pdfData||'') && driveIdFromUrl(x.pdfData); if(i) doomed.add(i); });
+    for(const id of doomed) await trashDriveFile(id);
     jobIndex = jobIndex.filter(j=>j.id!==job.id);
     delete jobs[job.id];
     await saveIndex();
@@ -2733,10 +2824,10 @@
         '<div id="iExtra" style="display:none;">'+
           '<div id="iWarn" style="color:var(--red);font-weight:700;margin-bottom:8px;"></div>'+
           '<div id="iBelow" style="display:none;margin-bottom:8px;">'+
-            '<label style="display:block;cursor:pointer;margin-bottom:4px;"><input type="checkbox" id="iDisc"> We got a discount</label>'+
+            '<label style="display:block;cursor:pointer;margin-bottom:4px;"><input type="checkbox" id="iDisc"> We got a deal</label>'+
             '<label style="display:block;cursor:pointer;"><input type="checkbox" id="iPart"> They haven\'t invoiced the whole amount yet</label>'+
           '</div>'+
-          '<div class="field"><label>Reason <span style="color:var(--red);">*</span></label><textarea id="iReason" placeholder="Why doesn\'t it match the quote?">'+esc(q.invoiceReason||'')+'</textarea></div>'+
+          '<div class="field"><label>Reason (optional)</label><textarea id="iReason" placeholder="Add a note if you want — not required">'+esc(q.invoiceReason||'')+'</textarea></div>'+
         '</div>'+
         '<div id="iErr" class="field-hint" style="color:var(--red);"></div>'+
       '</div>'+
@@ -2769,8 +2860,7 @@
       if(diff !== 0){
         reason = $('iReason').value.trim();
         if(diff < 0){ type = $('iDisc').checked ? 'discount' : $('iPart').checked ? 'partial' : null;
-          if(!type){ $('iErr').textContent = 'Tick whether this is a discount or not fully invoiced yet.'; return; } }
-        if(!reason){ $('iErr').textContent = 'A reason is required when the invoice doesn\'t match the quote.'; $('iReason').focus(); return; }
+          if(!type){ $('iErr').textContent = 'Tick whether we got a deal or it isn\'t fully invoiced yet.'; return; } }
       }
       q.invoiced = amt; q.invoiceReason = reason || null; q.invoiceType = type;
       q.invoicedBy = (myRole&&myRole.name)||''; q.invoicedAt = new Date().toISOString();
