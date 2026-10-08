@@ -339,7 +339,12 @@
   td.inv-over,td.inv-over *{color:var(--red);} td.inv-over{background:var(--red-bg);}
   td.inv-discount,td.inv-discount *{color:var(--green);} td.inv-discount{background:var(--green-bg);}
   td.inv-partial{background:#FFF3B0;} td.inv-partial,td.inv-partial *{color:#5A4F00;}
-  td.inv-match .inv-tick{color:var(--green);font-weight:800;}
+  td.inv-match .inv-tick{color:var(--green);font-weight:800;font-size:22px;line-height:1;vertical-align:middle;margin-right:4px;}
+  td.inv-match{background:var(--green-bg);}
+  .inv-key{display:flex;flex-wrap:wrap;align-items:center;gap:8px 18px;margin:0 0 14px;padding:10px 12px;background:var(--panel-2);border:1px solid var(--line);border-radius:4px;font-size:12px;}
+  .inv-key strong{font-size:11px;letter-spacing:0.06em;text-transform:uppercase;color:var(--ink-soft);}
+  .inv-key span.k{display:inline-flex;align-items:center;gap:6px;}
+  .inv-key i{display:inline-block;width:14px;height:14px;border-radius:3px;border:1px solid rgba(0,0,0,0.15);}
   .inv-note{font-size:11px;font-weight:600;white-space:normal;max-width:340px;margin-left:auto;}
   tr.extra-charged td{background:var(--green-bg);}
   .dl-wrap{position:relative;display:inline-block;}
@@ -2077,6 +2082,12 @@
     container.innerHTML =
       '<div class="panel">'+
         '<div class="panel-head"><h3>Quotes</h3><button class="btn btn-primary btn-sm" id="addQuoteBtn">+ Add quote</button></div>'+
+        '<div class="inv-key"><strong>Invoice key</strong>'+
+          '<span class="k"><i style="background:var(--green-bg);"></i><b style="color:var(--green);font-size:15px;">✓</b> Invoiced amount matches the quote</span>'+
+          '<span class="k"><i style="background:var(--green-bg);"></i>Green — we got a deal (invoiced less than quoted)</span>'+
+          '<span class="k"><i style="background:#FFF3B0;"></i>Yellow — not fully invoiced yet (still to come)</span>'+
+          '<span class="k"><i style="background:var(--red-bg);"></i>Red — invoiced more than quoted</span>'+
+        '</div>'+
         '<table><thead><tr><th>Description</th><th>Company &amp; contact</th><th>Status</th><th class="num-th">Amount</th><th class="num-th">Margin</th><th class="num-th">Charge customer</th><th class="num-th">Invoiced</th><th></th></tr></thead>'+
         '<tbody>'+rows+
         (quotes.length ? '<tr class="total-row"><td colspan="3">Approved total</td><td class="num-cell">'+money(approvedTotal)+'</td><td></td><td class="num-cell">'+money(approvedCustomerTotal)+'</td><td class="num-cell">'+money(approvedQuotes.reduce((t,q)=>t+(Number(q.invoiced)||0),0))+'</td><td></td></tr>' : '')+
