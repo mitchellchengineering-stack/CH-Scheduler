@@ -2,7 +2,10 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#111213">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
 <title>CH Engineering — Build Scheduler</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
@@ -424,6 +427,60 @@
     .gantt-label{width:120px;flex-basis:120px;}
     .gantt-scale{padding-left:120px;}
   }
+
+  /* ---------- Tablets & phones (desktop layout above is unchanged) ---------- */
+  .menu-btn,.back-btn{display:none;}
+  @media (max-width:1024px){
+    .sidebar{width:230px;}
+    .main{padding:20px 18px 60px;}
+    .topbar{flex-wrap:wrap;gap:10px 12px;}
+    .panel{overflow-x:auto;-webkit-overflow-scrolling:touch;}
+    .tabs{overflow-x:auto;white-space:nowrap;scrollbar-width:none;}
+    .tabs::-webkit-scrollbar{display:none;}
+    .tab{flex:0 0 auto;}
+    .stat{flex:1 1 150px;}
+    .job-header{flex-wrap:wrap;gap:10px;}
+  }
+  @media (pointer:coarse){
+    .btn,.icon-btn,.tab{min-height:40px;}
+    .btn-sm{min-height:36px;}
+    .field input,.field select,.field textarea,.job-search input{font-size:16px;}
+  }
+  @media (max-width:760px){
+    .gantt-scale-spacer{flex:0 0 120px;}
+  }
+  @media (max-width:700px){
+    html,body{-webkit-text-size-adjust:100%;}
+    #app{height:100vh;height:100dvh;min-height:0;}
+    .topbar{padding:8px 12px;padding-top:max(8px,env(safe-area-inset-top));padding-left:max(12px,env(safe-area-inset-left));padding-right:max(12px,env(safe-area-inset-right));}
+    .topbar img{height:32px;}
+    .logo-badge{padding:5px 9px;}
+    .topbar .divider,.topbar .sub{display:none;}
+    .topbar h1{font-size:12px;}
+    #newJobBtn{order:2;}
+    .menu-btn{display:inline-flex;order:3;}
+    #saveIndicator,#driveIndicator,#driveConnectBtn,#migrateBtn,#backupBtn,#restoreBtn,#whoAmI,#manageCrewBtn,#signOutBtn{display:none;order:5;}
+    .topbar.menu-open::after{content:'';order:4;flex:0 0 100%;height:0;}
+    .topbar.menu-open #saveIndicator,.topbar.menu-open #driveIndicator,.topbar.menu-open #whoAmI{display:flex;flex:1 1 45%;}
+    .topbar.menu-open #driveConnectBtn,.topbar.menu-open #migrateBtn,.topbar.menu-open #backupBtn,.topbar.menu-open #restoreBtn,.topbar.menu-open #manageCrewBtn,.topbar.menu-open #signOutBtn{display:inline-flex;flex:1 1 45%;justify-content:center;}
+    .sidebar{width:100%;border-right:none;flex:1 1 auto;}
+    .job-item{min-height:56px;}
+    .main{display:none;padding:12px 12px 80px;}
+    #app.job-open .sidebar{display:none;}
+    #app.job-open .main{display:block;}
+    .back-btn{display:inline-flex;margin-bottom:12px;}
+    .job-header{flex-direction:column;align-items:stretch;}
+    .job-header-actions{justify-content:flex-start;}
+    .panel{padding:14px 12px;}
+    table{min-width:520px;}
+    .field-row{flex-direction:column;gap:0;}
+    .tab{padding:12px 14px;}
+    .modal-overlay{padding:0;align-items:stretch;}
+    .modal{max-width:none;height:100vh;height:100dvh;max-height:none;border-radius:0;display:flex;flex-direction:column;overflow:hidden;}
+    .modal-body{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;}
+    .modal-foot{padding-bottom:max(14px,env(safe-area-inset-bottom));}
+    .modal-foot .btn{flex:1;}
+  }
 </style>
 </head>
 <body>
@@ -475,6 +532,7 @@
     <button class="btn btn-secondary" id="manageCrewBtn" style="display:none;">Manage crew</button>
     <button class="btn btn-secondary" id="signOutBtn">Sign out</button>
     <button class="btn btn-primary" id="newJobBtn">+ New job</button>
+    <button class="btn btn-secondary menu-btn" id="menuBtn" aria-label="Menu">&#9776; Menu</button>
   </div>
 
   <div class="body-row">
@@ -483,7 +541,7 @@
       <div class="job-search"><input type="text" id="jobSearch" placeholder="Search jobs..."></div>
       <div class="job-list" id="jobList"></div>
     </div>
-    <div class="main"><div class="main-inner" id="mainContent"></div></div>
+    <div class="main"><button class="btn btn-secondary back-btn" id="backToJobs">&larr; All jobs</button><div class="main-inner" id="mainContent"></div></div>
   </div>
 
 </div>
@@ -1280,6 +1338,7 @@
 
   // ---------------- Init ----------------
   async function init(){
+    wireMobileUI();
     startCloudSync();
     renderSidebar();
     renderMain();
@@ -1498,6 +1557,26 @@
     });
   }
 
+  const isPhone = () => window.matchMedia('(max-width:700px)').matches;
+  function syncMobileView(){
+    const app = document.getElementById('app');
+    const open = !!currentJobId;
+    if(app.classList.contains('job-open') === open) return;
+    app.classList.toggle('job-open', open);
+    const m = document.querySelector('.main'); if(m) m.scrollTop = 0;
+    if(open && isPhone()) history.pushState({job:1}, '');
+  }
+  let _mobileWired = false;
+  function wireMobileUI(){
+    if(_mobileWired) return; _mobileWired = true;
+    const bar = document.querySelector('.topbar');
+    document.getElementById('menuBtn').addEventListener('click', ()=> bar.classList.toggle('menu-open'));
+    bar.addEventListener('click', e=>{ const b = e.target.closest('button'); if(b && b.id !== 'menuBtn') bar.classList.remove('menu-open'); });
+    const goList = ()=>{ currentJobId = null; renderSidebar(); renderMain(); };
+    document.getElementById('backToJobs').addEventListener('click', ()=>{ if(history.state && history.state.job) history.back(); else goList(); });
+    window.addEventListener('popstate', ()=>{ if(isPhone() && currentJobId) goList(); });
+  }
+
   async function selectJob(id){
     currentJobId = id;
     activeTab = 'overview';
@@ -1507,6 +1586,7 @@
 
   // ---------------- Main ----------------
   async function renderMain(){
+    syncMobileView();
     hideGanttTooltip();
     const main = document.getElementById('mainContent');
     if(!currentJobId){
