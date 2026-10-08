@@ -339,8 +339,7 @@
   td.inv-over,td.inv-over *{color:var(--red);} td.inv-over{background:var(--red-bg);}
   td.inv-discount,td.inv-discount *{color:var(--green);} td.inv-discount{background:var(--green-bg);}
   td.inv-partial{background:#FFF3B0;} td.inv-partial,td.inv-partial *{color:#5A4F00;}
-  td.inv-match .inv-tick{color:var(--green);font-weight:800;font-size:22px;line-height:1;vertical-align:middle;margin-right:4px;}
-  td.inv-match{background:var(--green-bg);}
+  td.inv-match .inv-tick{color:var(--green);font-weight:800;font-size:34px;line-height:1;vertical-align:middle;margin-right:6px;}
   .inv-key{display:flex;flex-wrap:wrap;align-items:center;gap:8px 18px;margin:0 0 14px;padding:10px 12px;background:var(--panel-2);border:1px solid var(--line);border-radius:4px;font-size:12px;}
   .inv-key strong{font-size:11px;letter-spacing:0.06em;text-transform:uppercase;color:var(--ink-soft);}
   .inv-key span.k{display:inline-flex;align-items:center;gap:6px;}
@@ -2083,7 +2082,7 @@
       '<div class="panel">'+
         '<div class="panel-head"><h3>Quotes</h3><button class="btn btn-primary btn-sm" id="addQuoteBtn">+ Add quote</button></div>'+
         '<div class="inv-key"><strong>Invoice key</strong>'+
-          '<span class="k"><i style="background:var(--green-bg);"></i><b style="color:var(--green);font-size:15px;">✓</b> Invoiced amount matches the quote</span>'+
+          '<span class="k"><b style="color:var(--green);font-size:20px;line-height:1;">✓</b> Invoiced amount matches the quote (no highlight)</span>'+
           '<span class="k"><i style="background:var(--green-bg);"></i>Green — we got a deal (invoiced less than quoted)</span>'+
           '<span class="k"><i style="background:#FFF3B0;"></i>Yellow — not fully invoiced yet (still to come)</span>'+
           '<span class="k"><i style="background:var(--red-bg);"></i>Red — invoiced more than quoted</span>'+
