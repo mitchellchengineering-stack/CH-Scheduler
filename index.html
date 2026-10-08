@@ -532,7 +532,7 @@
 
     <div id="loginCrewSection">
       <div class="field"><label>Your name</label><input id="crewNameInput" type="text" placeholder="Exactly as your admin entered it"></div>
-      <div class="field"><label>Your code</label><input id="crewCodeInput" type="password" inputmode="numeric" placeholder="6-digit code"></div>
+      <div class="field"><label>Your code</label><input id="crewCodeInput" type="password" inputmode="numeric" placeholder="4-digit PIN"></div>
       <button class="btn btn-secondary" id="loginCrewBtn" style="width:100%;">Sign in</button>
       <div class="field-hint" id="crewLoginError" style="color:#c0392b;"></div>
     </div>
@@ -734,6 +734,9 @@
   function slugifyName(name){
     return (name||'').trim().toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'');
   }
+  // Firebase needs passwords of 6+ characters, so a 4-digit PIN is padded
+  // behind the scenes. Older 6-digit codes keep working unchanged.
+  function pinToPassword(pin){ pin = String(pin||'').trim(); return /^\d{4}$/.test(pin) ? 'CHpin-'+pin+'-eng' : pin; }
   function crewEmailFor(name){
     return slugifyName(name) + CREW_EMAIL_DOMAIN;
   }
@@ -822,7 +825,7 @@
       errEl.textContent = '';
       if(!name || !code){ errEl.textContent = 'Enter your name and code.'; return; }
       try{
-        await fbAuth.signInWithEmailAndPassword(crewEmailFor(name), code);
+        await fbAuth.signInWithEmailAndPassword(crewEmailFor(name), pinToPassword(code));
       }catch(e){
         errEl.textContent = 'Could not sign in — check your name is spelled exactly as your admin entered it, and your code is correct.';
       }
@@ -867,7 +870,7 @@
           '<h4 style="margin:0 0 8px;">Add someone</h4>'+
           '<div class="field"><label>Name</label><input id="newCrewName" type="text" placeholder="e.g. Dave Thompson"></div>'+
           '<div class="field-row">'+
-            '<div class="field"><label>6-digit code</label><input id="newCrewCode" type="text" inputmode="numeric" maxlength="6" placeholder="e.g. 482913"></div>'+
+            '<div class="field"><label>4-digit PIN</label><input id="newCrewCode" type="text" inputmode="numeric" maxlength="4" placeholder="e.g. 4829"></div>'+
             '<div class="field"><label>Role</label><select id="newCrewRole"><option value="worker">Worker</option><option value="director">Director</option><option value="admin">Admin</option></select></div>'+
           '</div>'+
           '<button class="btn btn-primary btn-sm" id="addCrewBtn">+ Add person</button>'+
@@ -934,7 +937,7 @@
   async function deleteCrewAuthAccount(name, code){
     const app2 = firebase.initializeApp(firebaseConfig, 'crewDelete-'+Date.now());
     try{
-      const cred = await app2.auth().signInWithEmailAndPassword(crewEmailFor(name), code);
+      const cred = await app2.auth().signInWithEmailAndPassword(crewEmailFor(name), pinToPassword(code));
       await cred.user.delete();
       return true;
     }catch(e){ console.error('Could not delete crew sign-in', e); return false; }
@@ -948,7 +951,7 @@
     const errEl = document.getElementById('addCrewError');
     errEl.textContent = '';
     if(!name){ errEl.textContent = 'Enter a name.'; return; }
-    if(!/^\d{6}$/.test(code)){ errEl.textContent = 'Code must be exactly 6 digits.'; return; }
+    if(!/^\d{4}$/.test(code)){ errEl.textContent = 'PIN must be exactly 4 digits.'; return; }
     // Create the crew member's sign-in on a SECOND, separate Firebase app
     // instance — creating a user on the normal connection would otherwise
     // sign you (the admin) out and sign in as them instead.
@@ -957,12 +960,12 @@
     try{
       let newUid;
       try{
-        const cred = await secondaryApp.auth().createUserWithEmailAndPassword(crewEmailFor(name), code);
+        const cred = await secondaryApp.auth().createUserWithEmailAndPassword(crewEmailFor(name), pinToPassword(code));
         newUid = cred.user.uid;
       }catch(e1){
         // a leftover sign-in from an earlier delete: take it over if the code matches
         if(e1 && e1.code === 'auth/email-already-in-use'){
-          const cred = await secondaryApp.auth().signInWithEmailAndPassword(crewEmailFor(name), code);
+          const cred = await secondaryApp.auth().signInWithEmailAndPassword(crewEmailFor(name), pinToPassword(code));
           newUid = cred.user.uid;
         } else throw e1;
       }
