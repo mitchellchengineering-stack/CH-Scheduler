@@ -639,6 +639,7 @@
   const fbApp = firebase.initializeApp(firebaseConfig);
   const fbAuth = firebase.auth();
   const db = firebase.firestore();
+  db.enablePersistence({synchronizeTabs:true}).catch(()=>{});
 
   let currentUser = null;      // Firebase auth user object
   let myRole = null;           // {role:'admin'|'director'|'worker', name}
@@ -693,6 +694,7 @@
     if(!user){
       currentUser = null;
       myRole = null;
+      stopCloudSync();
       showLoginGate('');
       return;
     }
@@ -753,6 +755,7 @@
       if(el) el.style.display = isAdminOrDirector() ? '' : 'none';
     });
     init();
+    setupLocalMigration();
   }
 
   // ---------------- Manage crew (admin only) ----------------
@@ -1012,6 +1015,7 @@
   }
 
   async function driveUploadFile(dataUri, filename, folderId){
+    if(typeof dataUri !== 'string' || dataUri.indexOf('data:') !== 0) return null;
     const commaIdx = dataUri.indexOf(',');
     const meta = dataUri.slice(5, commaIdx); // "mime;base64"
     const mimeType = meta.split(';')[0] || 'application/octet-stream';
@@ -1237,6 +1241,7 @@
     });
   }
   function openPdfDataUri(dataUri, filename){
+    if(/^https?:/i.test(dataUri)){ window.open(dataUri, '_blank'); return; }
     try{
       const parts = dataUri.split(',');
       const meta = parts[0];
@@ -1275,38 +1280,187 @@
 
   // ---------------- Init ----------------
   async function init(){
-    const idx = await storageGet('job-index');
-    if(idx){
-      try{ jobIndex = JSON.parse(idx); }catch(e){ jobIndex = []; }
-    } else {
-      jobIndex = [];
-    }
+    startCloudSync();
     renderSidebar();
     renderMain();
   }
 
+  // ---------------- Shared cloud storage (Firestore + Google Drive) ----------------
+  // jobs/{id}        -> everything workers may see (no money, no quotes)
+  // jobFinance/{id}  -> quotes + extras prices/PDFs (admin & director only, enforced by firestore.rules)
+  // Plans, quote PDFs and extras PDFs live in Google Drive; only their links are stored here.
+  const FINANCE_COLL = 'jobFinance';
+  let unsubJobs = null, unsubFin = null;
+  const isDataUri = v => typeof v === 'string' && v.indexOf('data:') === 0;
+
+  function stopCloudSync(){
+    if(unsubJobs){ unsubJobs(); unsubJobs = null; }
+    if(unsubFin){ unsubFin(); unsubFin = null; }
+    jobs = {}; jobIndex = []; currentJobId = null;
+  }
+  function startCloudSync(){
+    stopCloudSync();
+    let first = true;
+    unsubJobs = db.collection('jobs').onSnapshot(snap=>{
+      jobIndex = snap.docs.map(d=>indexEntryFromJob(Object.assign({id:d.id}, d.data()))).sort((a,b)=> a.id<b.id ? -1 : 1);
+      let touched = false;
+      snap.docChanges().forEach(c=>{
+        if(c.doc.metadata.hasPendingWrites) return;
+        delete jobs[c.doc.id];
+        if(c.doc.id === currentJobId) touched = true;
+      });
+      if(currentJobId && !jobIndex.some(j=>j.id===currentJobId)){ currentJobId = null; touched = true; }
+      renderSidebar();
+      if((first || touched) && !document.getElementById('mSave')) renderMain();
+      first = false;
+    }, err=>{
+      console.error(err);
+      setSaving(false, false);
+      alert('Could not load the shared jobs: '+err.message+'\n\nCheck the Firestore rules have been published.');
+    });
+    if(isAdminOrDirector()){
+      let firstFin = true;
+      unsubFin = db.collection(FINANCE_COLL).onSnapshot(snap=>{
+        snap.docChanges().forEach(c=>{
+          if(c.doc.metadata.hasPendingWrites) return;
+          delete jobs[c.doc.id];
+          if(!firstFin && c.doc.id === currentJobId && !document.getElementById('mSave')) renderMain();
+        });
+        firstFin = false;
+      }, err=>console.error(err));
+    }
+  }
+
+  async function ensureJobFolders(job){
+    if(job.driveFolderId && job.drivePlansFolderId && job.driveQuotesFolderId && job.driveExtrasFolderId) return;
+    const rootId = await ensureDriveRootFolder();
+    const jf = job.driveFolderId ? {id:job.driveFolderId} : await driveFindOrCreateChildFolder(job.name || 'Untitled job', rootId);
+    job.driveFolderId = jf.id;
+    job.driveFolderUrl = job.driveFolderUrl || 'https://drive.google.com/drive/folders/'+jf.id;
+    if(!job.drivePlansFolderId) job.drivePlansFolderId = (await driveFindOrCreateChildFolder('Plans', jf.id)).id;
+    if(!job.driveQuotesFolderId) job.driveQuotesFolderId = (await driveFindOrCreateChildFolder('Quotes', jf.id)).id;
+    if(!job.driveExtrasFolderId) job.driveExtrasFolderId = (await driveFindOrCreateChildFolder('Extras', jf.id)).id;
+  }
+
+  // Upload any freshly attached files to Drive and swap the file data for a Drive link.
+  async function externalizeFiles(job){
+    const items = [];
+    (job.plans||[]).forEach(p=>{ if(isDataUri(p.fileData)) items.push({o:p, k:'fileData', n:p.name||'plan', f:'drivePlansFolderId'}); });
+    (job.quotes||[]).forEach(q=>{ if(isDataUri(q.pdfData)) items.push({o:q, k:'pdfData', n:q.pdfName||'quote', f:'driveQuotesFolderId'}); });
+    (job.extras||[]).forEach(x=>{ if(isDataUri(x.pdfData)) items.push({o:x, k:'pdfData', n:x.pdfName||'extra', f:'driveExtrasFolderId'}); });
+    if(!items.length) return;
+    if(!(await ensureDriveToken())) return;
+    try{
+      await ensureJobFolders(job);
+      for(const it of items){
+        const up = await driveUploadFile(it.o[it.k], it.n, job[it.f]);
+        await driveFetch('https://www.googleapis.com/drive/v3/files/'+up.id+'/permissions', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({role:'reader', type:'anyone'})
+        });
+        it.o[it.k] = up.webViewLink || ('https://drive.google.com/file/d/'+up.id+'/view');
+      }
+    }catch(e){ console.error('Drive upload failed', e); }
+  }
+
+  // Anything still holding raw file data couldn't reach Drive — drop it from the shared copy.
+  function stripUnsavedFiles(job){
+    let n = 0;
+    job.plans = (job.plans||[]).filter(p=>{ if(isDataUri(p.fileData)){ n++; return false; } return true; });
+    (job.quotes||[]).concat(job.extras||[]).forEach(x=>{ if(isDataUri(x.pdfData)){ x.pdfData = null; x.pdfName = null; n++; } });
+    return n;
+  }
+
+  function splitJob(job){
+    const pub = JSON.parse(JSON.stringify(job));
+    const fin = {quotes: pub.quotes || [], extras: {}};
+    delete pub.quotes;
+    delete pub.updatedAt;
+    pub.extras = (pub.extras||[]).map(x=>{
+      const rest = Object.assign({}, x);
+      fin.extras[x.id] = {amount: x.amount==null?null:x.amount, margin: x.margin==null?null:x.margin, pdfData: x.pdfData||null, pdfName: x.pdfName||null};
+      delete rest.amount; delete rest.margin; delete rest.pdfData; delete rest.pdfName;
+      return rest;
+    });
+    return {pub, fin};
+  }
+
   async function loadJob(id){
     if(jobs[id]) return jobs[id];
-    const raw = await storageGet('job:'+id);
-    if(!raw) return null;
     try{
-      const job = JSON.parse(raw);
-      job.quotes = job.quotes || [];
-      job.timeline = job.timeline || [];
-      job.plans = job.plans || [];
+      const snap = await db.collection('jobs').doc(id).get();
+      if(!snap.exists) return null;
+      const job = Object.assign({}, snap.data(), {id});
+      delete job.updatedAt;
+      job.quotes = []; job.timeline = job.timeline || []; job.plans = job.plans || []; job.extras = job.extras || [];
+      if(isAdminOrDirector()){
+        const f = await db.collection(FINANCE_COLL).doc(id).get();
+        if(f.exists){
+          const fd = f.data();
+          job.quotes = fd.quotes || [];
+          job.extras = job.extras.map(x=>Object.assign({}, x, (fd.extras||{})[x.id] || {}));
+        }
+      }
       jobs[id] = job;
       return job;
-    }catch(e){ return null; }
+    }catch(e){ console.error(e); return null; }
   }
 
   async function saveJob(job){
     jobs[job.id] = job;
-    await storageSet('job:'+job.id, JSON.stringify(job));
+    setSaving(true);
+    try{
+      await externalizeFiles(job);
+      const lost = stripUnsavedFiles(job);
+      const parts = splitJob(job);
+      parts.pub.updatedAt = firebase.firestore.FieldValue.serverTimestamp();
+      const writes = [db.collection('jobs').doc(job.id).set(parts.pub)];
+      if(isAdminOrDirector()) writes.push(db.collection(FINANCE_COLL).doc(job.id).set(parts.fin));
+      await Promise.all(writes);
+      setSaving(false, true);
+      if(lost) alert(lost+' file(s) could not be saved because they couldn\'t be uploaded to Google Drive.\n\nUploads need the Drive owner\'s Google account connected (use "Connect Drive"). Please re-attach the file(s).');
+      return true;
+    }catch(e){
+      console.error(e);
+      setSaving(false, false);
+      alert('Could not save to the shared database: '+(e && e.message ? e.message : e));
+      return false;
+    }
   }
 
-  async function saveIndex(){
-    await storageSet('job-index', JSON.stringify(jobIndex));
+  async function saveIndex(){ /* the job list now comes live from Firestore */ }
+
+  // One-time: push jobs saved in this browser (old version) up to the shared database.
+  async function setupLocalMigration(){
+    if(!isAdminRole()) return;
+    try{ if(localStorage.getItem('ch-scheduler-migrated')) return; }catch(e){}
+    let local = [];
+    try{ await migrateFromLocalStorageOnce(); const raw = await idbGet(STORAGE_PREFIX+'job-index'); if(raw) local = JSON.parse(raw); }catch(e){}
+    if(!local.length) return;
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-primary'; btn.id = 'migrateBtn';
+    btn.textContent = 'Upload this device\'s '+local.length+' job(s)';
+    document.getElementById('driveConnectBtn').insertAdjacentElement('afterend', btn);
+    btn.addEventListener('click', async ()=>{
+      if(!driveConnected){ alert('Click "Connect Drive" first so plans and PDFs can be uploaded to Drive, then click this button again.'); return; }
+      if(!confirm('Upload '+local.length+' job(s) from this device to the shared database? Files will move to Google Drive.')) return;
+      btn.disabled = true; let n = 0;
+      for(const e of local){
+        const raw = await idbGet(STORAGE_PREFIX+'job:'+e.id);
+        if(!raw) continue;
+        try{
+          const job = JSON.parse(raw);
+          job.quotes = job.quotes||[]; job.timeline = job.timeline||[]; job.plans = job.plans||[]; job.extras = job.extras||[];
+          if(await saveJob(job)) n++;
+        }catch(err){ console.error(err); }
+      }
+      try{ localStorage.setItem('ch-scheduler-migrated','1'); }catch(e){}
+      btn.remove();
+      alert('Uploaded '+n+' job(s). Everyone signed in will now see them.');
+    });
   }
+
+
 
   function indexEntryFromJob(job){
     return {id:job.id, name:job.name, client:job.client, type:job.type, status:job.status};
@@ -1505,7 +1659,7 @@
       }
       await saveJob(job);
       renderMain();
-      if(job.drivePlansFolderId && driveConnected){
+      if(false){
         ensureDriveToken().then(ok=>{
           if(!ok) return;
           const justAdded = job.plans.slice(-files.length);
@@ -1784,7 +1938,7 @@
       closeModal();
       renderMain();
       if(job.driveSheetId) pushExtrasToSheet(job);
-      if(file && driveConnected){
+      if(false){
         ensureDriveToken().then(async ok=>{
           if(!ok) return;
           if(!job.driveExtrasFolderId && job.driveFolderId){
@@ -2203,7 +2357,7 @@
     jobIndex = jobIndex.filter(j=>j.id!==job.id);
     delete jobs[job.id];
     await saveIndex();
-    await storageDelete('job:'+job.id);
+    try{ await db.collection('jobs').doc(job.id).delete(); await db.collection(FINANCE_COLL).doc(job.id).delete(); }catch(e){ alert('Could not delete: '+(e && e.message ? e.message : e)); }
     if(currentJobId === job.id) currentJobId = null;
     renderSidebar();
     renderMain();
@@ -2294,7 +2448,7 @@
       closeModal();
       renderMain();
       if(job.driveSheetId) pushQuotesToSheet(job);
-      if(file && job.driveQuotesFolderId && driveConnected){
+      if(false){
         ensureDriveToken().then(ok=>{
           if(ok) driveUploadFile(data.pdfData, data.pdfName, job.driveQuotesFolderId).catch(e=>console.error('Quote file upload failed', e));
         });
