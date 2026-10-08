@@ -336,6 +336,17 @@
   .tl-removed h4{margin:0 0 6px;font-size:12px;text-transform:uppercase;letter-spacing:0.06em;color:var(--red);}
   .tl-removed-item{font-size:12px;color:var(--ink-soft);padding:5px 0;border-bottom:1px solid var(--line);}
   .owner-tag{display:inline-block;padding:1px 7px;border-radius:3px;background:var(--yellow);font-size:10.5px;font-weight:800;}
+  td.inv-over,td.inv-over *{color:var(--red);} td.inv-over{background:var(--red-bg);}
+  td.inv-discount,td.inv-discount *{color:var(--green);} td.inv-discount{background:var(--green-bg);}
+  td.inv-partial{background:#FFF3B0;} td.inv-partial,td.inv-partial *{color:#5A4F00;}
+  td.inv-match .inv-tick{color:var(--green);font-weight:800;}
+  .inv-note{font-size:11px;font-weight:600;white-space:normal;max-width:190px;margin-left:auto;}
+  tr.extra-charged td{background:var(--green-bg);}
+  .dl-wrap{position:relative;display:inline-block;}
+  .dl-menu{display:none;position:absolute;right:0;top:100%;margin-top:4px;background:var(--panel);border:1px solid var(--line-strong);border-radius:4px;box-shadow:0 8px 20px rgba(0,0,0,0.15);z-index:60;min-width:230px;overflow:hidden;}
+  .dl-menu.open{display:block;}
+  .dl-menu button{display:block;width:100%;text-align:left;padding:10px 14px;border:none;background:transparent;font:inherit;font-size:13px;font-weight:600;cursor:pointer;}
+  .dl-menu button:hover{background:var(--panel-2);}
   .legend{display:flex;gap:16px;margin-top:16px;flex-wrap:wrap;}
   .legend-item{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--ink-soft);}
   .legend-swatch{width:10px;height:10px;border-radius:2px;}
@@ -1313,6 +1324,16 @@
     const amt = Number(q.amount)||0;
     return amt + amt*(quoteMargin(q)/100);
   }
+  function invoiceState(q){
+    if(!q || q.invoiced===undefined || q.invoiced===null || q.invoiced==='') return null;
+    const diff = Math.round((Number(q.invoiced)-(Number(q.amount)||0))*100)/100;
+    if(diff === 0) return {cls:'inv-match', label:'Matches quote', diff, rgb:null};
+    if(diff > 0) return {cls:'inv-over', label:'Invoiced MORE than quoted', diff, rgb:[251,234,232]};
+    if(q.invoiceType === 'discount') return {cls:'inv-discount', label:'Discount received', diff, rgb:[233,244,238]};
+    if(q.invoiceType === 'partial') return {cls:'inv-partial', label:'Not fully invoiced yet', diff, rgb:[255,243,176]};
+    return {cls:'inv-over', label:'Under quote - no reason given', diff, rgb:[251,234,232]};
+  }
+  function signedMoney(n){ return (n<0?'-':'+')+money(Math.abs(n)); }
   function extraCustomerPrice(x){
     const amt = Number(x && x.amount)||0;
     return amt + amt*(quoteMargin(x)/100);
@@ -1585,8 +1606,8 @@
     delete pub.updatedAt;
     pub.extras = (pub.extras||[]).map(x=>{
       const rest = Object.assign({}, x);
-      fin.extras[x.id] = {amount: x.amount==null?null:x.amount, margin: x.margin==null?null:x.margin, pdfData: x.pdfData||null, pdfName: x.pdfName||null};
-      delete rest.amount; delete rest.margin; delete rest.pdfData; delete rest.pdfName;
+      fin.extras[x.id] = {amount: x.amount==null?null:x.amount, margin: x.margin==null?null:x.margin, pdfData: x.pdfData||null, pdfName: x.pdfName||null, charged: !!x.charged, chargedBy: x.chargedBy||null, chargedAt: x.chargedAt||null};
+      delete rest.amount; delete rest.margin; delete rest.pdfData; delete rest.pdfName; delete rest.charged; delete rest.chargedBy; delete rest.chargedAt;
       return rest;
     });
     return {pub, fin};
@@ -1770,7 +1791,7 @@
             ('<a class="btn btn-secondary btn-sm" href="'+esc(job.driveFolderUrl)+'" target="_blank" rel="noopener">Open Drive folder</a>'+
              (job.driveSheetUrl ? '<a class="btn btn-secondary btn-sm" href="'+esc(job.driveSheetUrl)+'" target="_blank" rel="noopener">Open Sheet</a>' : ''))
             : (isAdminOrDirector() ? '<button class="btn btn-secondary btn-sm" id="driveSetupBtn">Set up Drive folder</button>' : ''))+
-          (isAdminOrDirector() ? '<button class="btn btn-secondary btn-sm" id="exportPdfBtn">Export PDF</button>'+
+          (isAdminOrDirector() ? '<div class="dl-wrap"><button class="btn btn-secondary btn-sm" id="exportPdfBtn">Download PDF ▾</button><div class="dl-menu" id="dlMenu"><button data-pdf="money">Money — quotes &amp; extras</button><button data-pdf="timeline">Timeline</button></div></div>'+
           '<button class="btn btn-secondary btn-sm" id="exportXlsxBtn">Export Excel</button>'+
           '<button class="btn btn-secondary btn-sm" id="editJobBtn">Edit job</button>'+
           '<button class="btn btn-danger btn-sm" id="deleteJobBtn">Delete</button>' : '')+
@@ -1779,7 +1800,7 @@
       '<div class="tabs">'+
         tabHtml('overview','Overview')+
         (isAdminOrDirector() ? tabHtml('quotes','Quotes') : '')+
-        tabHtml('extras','Extras')+
+        (isAdminOrDirector() ? tabHtml('extras','Extras') : '')+
         tabHtml('timeline','Timeline')+
       '</div>'+
       '<div id="tabContent"></div>';
@@ -1787,7 +1808,13 @@
     if(isAdminOrDirector()){
       document.getElementById('editJobBtn').addEventListener('click', ()=>openJobModal(job));
       document.getElementById('deleteJobBtn').addEventListener('click', ()=>deleteJob(job));
-      document.getElementById('exportPdfBtn').addEventListener('click', ()=>exportJobPDF(job));
+      const dlMenu = document.getElementById('dlMenu');
+      document.getElementById('exportPdfBtn').addEventListener('click', (ev)=>{
+        ev.stopPropagation(); dlMenu.classList.toggle('open');
+        const close = ()=>{ dlMenu.classList.remove('open'); document.removeEventListener('click', close); };
+        if(dlMenu.classList.contains('open')) document.addEventListener('click', close);
+      });
+      dlMenu.querySelectorAll('[data-pdf]').forEach(b=>b.addEventListener('click', ()=>{ dlMenu.classList.remove('open'); exportJobPDF(job, b.getAttribute('data-pdf')); }));
       document.getElementById('exportXlsxBtn').addEventListener('click', ()=>exportJobSpreadsheet(job));
     }
     const driveSetupBtn = document.getElementById('driveSetupBtn');
@@ -1936,23 +1963,32 @@
 
     let rows = '';
     if(sorted.length === 0){
-      rows = '<tr><td colspan="7"><div class="panel-empty"><strong>No quotes yet</strong>Add doors, steel frame, trusses, battens or any other trade quote for this job.</div></td></tr>';
+      rows = '<tr><td colspan="8"><div class="panel-empty"><strong>No quotes yet</strong>Add doors, steel frame, trusses, battens or any other trade quote for this job.</div></td></tr>';
     } else {
       sorted.forEach(q=>{
         const pillClass = QUOTE_STATUS_CLASS[q.status] || 'status-pending';
         const isApproved = q.status === 'Approved';
         const cust = customerPrice(q);
+        const inv = isApproved ? invoiceState(q) : null;
+        const invCls = inv ? ' '+inv.cls : '';
+        let invCell;
+        if(!isApproved) invCell = '<span class="cell-dash">—</span>';
+        else if(!inv) invCell = '<button class="icon-btn" data-invoice="'+q.id+'">+ Invoiced</button>';
+        else invCell = (inv.cls==='inv-match'?'<span class="inv-tick">✓ </span>':'')+money(q.invoiced)+
+          (inv.diff!==0 ? '<div class="inv-note">'+esc(inv.label)+' ('+signedMoney(inv.diff)+')'+(q.invoiceReason?': '+esc(q.invoiceReason):'')+'</div>' : '')+
+          '<div><button class="icon-btn" data-invoice="'+q.id+'">Edit</button></div>';
         rows += '<tr>'+
           '<td>'+esc(q.description)+(q.pdfData ? '<div class="quote-pdf-flag">'+(isImageFile(q.pdfName)?'🖼️ ':'📎 ')+esc(q.pdfName||'Quote file')+'</div>' : '')+'</td>'+
           '<td><div class="quote-company">'+esc(q.trade||'—')+'</div>'+contactLine(q)+'</td>'+
           '<td><span class="status-pill '+pillClass+'">'+esc(q.status||'Not sent yet')+'</span></td>'+
-          '<td class="num-cell">'+money(q.amount)+'</td>'+
+          '<td class="num-cell'+invCls+'">'+money(q.amount)+'</td>'+
           '<td class="margin-cell">'+
             (isApproved
               ? '<input class="margin-input" type="number" step="0.1" min="0" data-margin="'+q.id+'" value="'+(q.margin!==undefined&&q.margin!==null?q.margin:'')+'" placeholder="'+DEFAULT_MARGIN+'"><span class="unit">%</span>'
               : '<span class="cell-dash">—</span>')+
           '</td>'+
           '<td class="num-cell">'+(cust!==null ? '<span class="customer-price">'+money(cust)+'</span>' : '<span class="cell-dash">—</span>')+'</td>'+
+          '<td class="num-cell'+invCls+'">'+invCell+'</td>'+
           '<td><div class="row-actions">'+
             (q.pdfData ? '<button class="icon-btn" data-view-pdf="'+q.id+'">'+(isImageFile(q.pdfName)?'View image':'View PDF')+'</button>' : '')+
             '<button class="icon-btn" data-edit="'+q.id+'">Edit</button>'+
@@ -1964,13 +2000,19 @@
     container.innerHTML =
       '<div class="panel">'+
         '<div class="panel-head"><h3>Quotes</h3><button class="btn btn-primary btn-sm" id="addQuoteBtn">+ Add quote</button></div>'+
-        '<table><thead><tr><th>Description</th><th>Company &amp; contact</th><th>Status</th><th class="num-th">Amount</th><th class="num-th">Margin</th><th class="num-th">Charge customer</th><th></th></tr></thead>'+
+        '<table><thead><tr><th>Description</th><th>Company &amp; contact</th><th>Status</th><th class="num-th">Amount</th><th class="num-th">Margin</th><th class="num-th">Charge customer</th><th class="num-th">Invoiced</th><th></th></tr></thead>'+
         '<tbody>'+rows+
-        (quotes.length ? '<tr class="total-row"><td colspan="3">Approved total</td><td class="num-cell">'+money(approvedTotal)+'</td><td></td><td class="num-cell">'+money(approvedCustomerTotal)+'</td><td></td></tr>' : '')+
+        (quotes.length ? '<tr class="total-row"><td colspan="3">Approved total</td><td class="num-cell">'+money(approvedTotal)+'</td><td></td><td class="num-cell">'+money(approvedCustomerTotal)+'</td><td class="num-cell">'+money(approvedQuotes.reduce((t,q)=>t+(Number(q.invoiced)||0),0))+'</td><td></td></tr>' : '')+
         '</tbody></table>'+
         '<div class="field-hint" style="margin-top:10px;">Margin defaults to '+DEFAULT_MARGIN+'% on every approved quote. Type a different number on a specific trade to override it.</div>'+
       '</div>';
 
+    container.querySelectorAll('[data-invoice]').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        const q = quotes.find(x=>x.id===btn.getAttribute('data-invoice'));
+        if(q) openInvoiceModal(job, q);
+      });
+    });
     document.getElementById('addQuoteBtn').addEventListener('click', ()=>openQuoteModal(job, null));
     container.querySelectorAll('[data-view-pdf]').forEach(btn=>{
       btn.addEventListener('click', ()=>{
@@ -2009,7 +2051,8 @@
     const canPrice = isAdminOrDirector();
     const total = extras.reduce((s,x)=>s+(Number(x.amount)||0),0);
     const customerTotal = extras.reduce((s,x)=>s+extraCustomerPrice(x),0);
-    const colCount = canPrice ? 5 : 2;
+    const colCount = 6;
+    const outstanding = extras.filter(x=>!x.charged).reduce((s,x)=>s+extraCustomerPrice(x),0);
 
     let rows = '';
     if(extras.length === 0){
@@ -2018,7 +2061,7 @@
       extras.forEach(x=>{
         const hasPrice = x.amount !== undefined && x.amount !== null && x.amount !== 0;
         const cust = extraCustomerPrice(x);
-        rows += '<tr>'+
+        rows += '<tr'+(x.charged?' class="extra-charged"':'')+'>'+
           '<td>'+esc(x.description)+(x.notes ? '<div class="extra-notes">'+esc(x.notes)+'</div>' : '')+
             (x.pdfData ? '<div class="quote-pdf-flag">'+(isImageFile(x.pdfName)?'🖼️ ':'📎 ')+esc(x.pdfName||'Attachment')+'</div>' : '')+
             (!canPrice && !hasPrice ? '<div class="field-hint">Awaiting price</div>' : '')+'</td>'+
@@ -2027,6 +2070,8 @@
             '<td class="margin-cell"><input class="margin-input" type="number" step="0.1" min="0" data-margin="'+x.id+'" value="'+(x.margin!==undefined&&x.margin!==null?x.margin:'')+'" placeholder="'+DEFAULT_MARGIN+'"><span class="unit">%</span></td>'+
             '<td class="num-cell"><span class="customer-price">'+(hasPrice?money(cust):'<span class="field-hint">Awaiting price</span>')+'</span></td>'
           ) : '')+
+          '<td style="text-align:center;white-space:nowrap;"><label style="cursor:pointer;"><input type="checkbox" data-charged="'+x.id+'" '+(x.charged?'checked':'')+'> '+(x.charged?'Charged':'To charge')+'</label>'+
+            (x.charged&&x.chargedBy ? '<div class="field-hint">'+esc(x.chargedBy)+(x.chargedAt?' · '+esc(fmtDate(String(x.chargedAt).slice(0,10))):'')+'</div>' : '')+'</td>'+
           '<td><div class="row-actions">'+
             (x.pdfData ? '<button class="icon-btn" data-view-pdf="'+x.id+'">'+(isImageFile(x.pdfName)?'View image':'View PDF')+'</button>' : '')+
             '<button class="icon-btn" data-edit="'+x.id+'">Edit</button>'+
@@ -2040,14 +2085,25 @@
         '<div class="panel-head"><h3>Extras to charge customer</h3><button class="btn btn-primary btn-sm" id="addExtraBtn">+ Add extra</button></div>'+
         '<table><thead><tr><th>Description &amp; notes</th>'+
           (canPrice ? '<th class="num-th">Cost to us</th><th class="num-th">Margin</th><th class="num-th">Charge customer</th>' : '')+
-          '<th></th></tr></thead>'+
+          '<th style="text-align:center">Charged?</th><th></th></tr></thead>'+
         '<tbody>'+rows+
-        (extras.length && canPrice ? '<tr class="total-row"><td>Total</td><td class="num-cell">'+money(total)+'</td><td></td><td class="num-cell">'+money(customerTotal)+'</td><td></td></tr>' : '')+
+        (extras.length && canPrice ? '<tr class="total-row"><td>Total</td><td class="num-cell">'+money(total)+'</td><td></td><td class="num-cell">'+money(customerTotal)+'</td><td class="num-cell" style="font-size:11.5px;">Left to charge '+money(outstanding)+'</td><td></td></tr>' : '')+
         '</tbody></table>'+
         (canPrice ? '<div class="field-hint" style="margin-top:10px;">Margin defaults to '+DEFAULT_MARGIN+'% like your trade quotes. Attach whatever the customer sent you — a PDF, an email screenshot, a photo of a sketch — so you can always find it again.</div>' :
           '<div class="field-hint" style="margin-top:10px;">You can add the description of what the customer asked for — your admin will add the price.</div>')+
       '</div>';
 
+    container.querySelectorAll('[data-charged]').forEach(cb=>{
+      cb.addEventListener('change', async ()=>{
+        const x = extras.find(v=>v.id===cb.getAttribute('data-charged'));
+        if(!x) return;
+        x.charged = cb.checked;
+        x.chargedBy = cb.checked ? ((myRole&&myRole.name)||'') : null;
+        x.chargedAt = cb.checked ? new Date().toISOString() : null;
+        await saveJob(job);
+        renderMain();
+      });
+    });
     document.getElementById('addExtraBtn').addEventListener('click', ()=>openExtraModal(job, null));
     container.querySelectorAll('[data-view-pdf]').forEach(btn=>{
       btn.addEventListener('click', ()=>{
@@ -2404,100 +2460,147 @@
     return (s||'job').replace(/[^\w\- ]+/g,'').trim().replace(/\s+/g,'_') || 'job';
   }
 
-  function exportJobPDF(job){
-    if(!(window.jspdf && window.jspdf.jsPDF)){
-      alert('PDF export library is still loading — please try again in a moment.');
-      return;
-    }
-    const { jsPDF } = window.jspdf;
-    const doc = new jsPDF({unit:'pt', format:'a4'});
-    const pageWidth = doc.internal.pageSize.getWidth();
-    const margin = 40;
-    let y = 40;
-
-    if(LOGO_DATA_URI){
-      // Logo's natural aspect ratio is roughly 4:1 (wide banner) — keep it
-      // proportional instead of squashing it into a fixed box.
-      try{ doc.addImage(LOGO_DATA_URI, 'PNG', margin, y, 150, 37.7); }catch(e){}
-    }
-    doc.setFont('helvetica','bold'); doc.setFontSize(16);
-    doc.text(job.name||'Job', pageWidth-margin, y+14, {align:'right'});
+  function pdfStart(job, title){
+    if(!(window.jspdf && window.jspdf.jsPDF)){ alert('PDF export library is still loading — please try again in a moment.'); return null; }
+    const doc = new window.jspdf.jsPDF({unit:'pt', format:'a4', orientation:'landscape'});
+    const W = doc.internal.pageSize.getWidth(), m = 40; let y = 40;
+    if(LOGO_DATA_URI){ try{ doc.addImage(LOGO_DATA_URI, 'PNG', m, y, 150, 37.7); }catch(e){} }
+    doc.setFont('helvetica','bold'); doc.setFontSize(16); doc.text(job.name||'Job', W-m, y+14, {align:'right'});
     doc.setFont('helvetica','normal'); doc.setFontSize(10); doc.setTextColor(90,90,90);
-    doc.text('CH Engineering — Build Scheduler', pageWidth-margin, y+30, {align:'right'});
+    doc.text(title+'  |  CH Engineering - Build Scheduler  |  '+new Date().toLocaleDateString(), W-m, y+30, {align:'right'});
     doc.setTextColor(0,0,0);
-    y += 60;
-    doc.setDrawColor(220,220,220); doc.line(margin, y, pageWidth-margin, y);
-    y += 22;
-
-    doc.setFont('helvetica','bold'); doc.setFontSize(12);
-    doc.text('Overview', margin, y);
-    y += 16;
-    doc.setFont('helvetica','normal'); doc.setFontSize(10);
-    const overviewLines = [
-      ['Client', job.client||'—'],
-      ['Job type', job.type||'—'],
-      ['Status', job.status||'—'],
-      ['Address / site', job.address||'—']
-    ];
-    overviewLines.forEach(([label,val])=>{
-      doc.setFont('helvetica','bold'); doc.text(label+':', margin, y);
-      doc.setFont('helvetica','normal'); doc.text(String(val), margin+110, y);
-      y += 16;
+    y += 58; doc.setDrawColor(220,220,220); doc.line(m, y, W-m, y); y += 20;
+    doc.setFontSize(10);
+    [['Client',job.client],['Job type',job.type],['Status',job.status],['Address / site',job.address]].forEach(([l,v])=>{
+      doc.setFont('helvetica','bold'); doc.text(l+':', m, y); doc.setFont('helvetica','normal'); doc.text(String(v||'-'), m+95, y); y += 15;
     });
     if(job.notes){
-      y += 6;
-      doc.setFont('helvetica','bold'); doc.text('Notes:', margin, y); y += 14;
-      doc.setFont('helvetica','normal');
-      const noteLines = doc.splitTextToSize(job.notes, pageWidth-margin*2);
-      doc.text(noteLines, margin, y);
-      y += noteLines.length*13;
+      doc.setFont('helvetica','bold'); doc.text('Notes:', m, y); doc.setFont('helvetica','normal');
+      const lines = doc.splitTextToSize(job.notes, W-m*2-95); doc.text(lines, m+95, y); y += lines.length*13;
     }
-    y += 10;
+    return {doc, W, m, y: y+12};
+  }
+  function pdfHeading(c, text){
+    if(c.y > c.doc.internal.pageSize.getHeight()-110){ c.doc.addPage(); c.y = 40; }
+    c.doc.setFont('helvetica','bold'); c.doc.setFontSize(12); c.doc.setTextColor(0,0,0); c.doc.text(text, c.m, c.y); c.y += 8;
+  }
+  const PDF_HEAD = {fillColor:[11,12,12], textColor:255};
 
-    const quotes = job.quotes || [];
-    const approvedTotal = quotes.filter(q=>q.status==='Approved').reduce((s,q)=>s+(Number(q.amount)||0),0);
-    const approvedCustomerTotal = quotes.filter(q=>q.status==='Approved').reduce((s,q)=>s+(customerPrice(q)||0),0);
+  function exportJobPDF(job, kind){
+    if(kind === 'timeline') return exportTimelinePDF(job);
+    return exportMoneyPDF(job);
+  }
 
+  function exportMoneyPDF(job){
+    const c = pdfStart(job, 'Quotes & Extras'); if(!c) return;
+    const doc = c.doc, quotes = job.quotes || [], extras = job.extras || [];
+
+    pdfHeading(c, 'Quotes');
+    const states = quotes.map(q=> q.status==='Approved' ? invoiceState(q) : null);
+    const approved = quotes.filter(q=>q.status==='Approved');
+    const aTotal = approved.reduce((t,q)=>t+(Number(q.amount)||0),0);
+    const aCust = approved.reduce((t,q)=>t+(customerPrice(q)||0),0);
+    const aInv = approved.reduce((t,q)=>t+(Number(q.invoiced)||0),0);
     doc.autoTable({
-      startY: y,
-      margin: {left:margin, right:margin},
-      head: [['Description','Company','Status','Amount','Margin','Charge customer']],
-      body: quotes.length ? quotes.map(q=>[
-        q.description||'', q.trade||'—', q.status||'Not sent yet',
-        money(q.amount), q.status==='Approved' ? quoteMargin(q)+'%' : '—',
-        customerPrice(q)!==null ? money(customerPrice(q)) : '—'
-      ]) : [['No quotes added yet.','','','','','']],
-      foot: quotes.length ? [['','','Approved total', money(approvedTotal), '', money(approvedCustomerTotal)]] : [],
-      styles:{fontSize:9, cellPadding:5},
-      headStyles:{fillColor:[11,12,12], textColor:255},
-      footStyles:{fillColor:[240,240,240], textColor:20, fontStyle:'bold'},
-      theme:'grid'
-    });
-    y = doc.lastAutoTable.finalY + 26;
-
-    if(y > doc.internal.pageSize.getHeight()-120){ doc.addPage(); y = 40; }
-    doc.setFont('helvetica','bold'); doc.setFontSize(12);
-    doc.text('Trade timeline', margin, y);
-    y += 10;
-
-    const timeline = (job.timeline||[]).slice().sort((a,b)=>(a.start||'').localeCompare(b.start||''));
-    doc.autoTable({
-      startY: y+8,
-      margin: {left:margin, right:margin},
-      head: [['Trade','Description','Start','End','Status','Cost']],
-      body: timeline.length ? timeline.map(e=>{
-        const info = getEntryCost(job, e);
+      startY: c.y, margin:{left:c.m, right:c.m},
+      head:[['Description','Company','Contact','Phone / Email','Status','Quoted','Margin','Charge customer','Invoiced','Invoice check']],
+      body: quotes.length ? quotes.map((q,i)=>{
+        const st = states[i];
+        let note = '-';
+        if(st){
+          note = st.label+(st.diff!==0?' ('+signedMoney(st.diff)+')':'');
+          if(q.invoiceReason) note += '\nReason: '+q.invoiceReason;
+          if(q.invoicedBy) note += '\n'+q.invoicedBy+(q.invoicedAt?', '+fmtDate(String(q.invoicedAt).slice(0,10)):'');
+        }
         return [
-          e.trade||'', e.description||'', fmtDate(e.start), fmtDate(e.end)||fmtDate(e.start), e.status||'',
-          info ? money(info.amount) : '—'
+          (q.description||'')+(q.pdfName?'\nFile: '+q.pdfName:''),
+          q.trade||'-', q.contactName||'-', [q.phone,q.email].filter(Boolean).join('\n')||'-',
+          q.status||'Not sent yet', money(q.amount),
+          q.status==='Approved' ? quoteMargin(q)+'%' : '-',
+          customerPrice(q)!==null ? money(customerPrice(q)) : '-',
+          st ? money(q.invoiced) : '-', note
         ];
-      }) : [['No trades scheduled yet.','','','','','']],
-      styles:{fontSize:9, cellPadding:5},
-      headStyles:{fillColor:[11,12,12], textColor:255},
-      theme:'grid'
+      }) : [['No quotes added yet.','','','','','','','','','']],
+      foot: quotes.length ? [['','','','','Approved total', money(aTotal), '', money(aCust), money(aInv), '']] : [],
+      styles:{fontSize:8, cellPadding:4}, headStyles:PDF_HEAD,
+      footStyles:{fillColor:[240,240,240], textColor:20, fontStyle:'bold'}, theme:'grid',
+      didParseCell:(d)=>{
+        if(d.section==='body' && quotes.length && (d.column.index===5 || d.column.index===8 || d.column.index===9)){
+          const st = states[d.row.index];
+          if(st && st.rgb){ d.cell.styles.fillColor = st.rgb; if(st.cls==='inv-over') d.cell.styles.textColor=[178,58,46]; }
+        }
+      }
     });
+    c.y = doc.lastAutoTable.finalY + 26;
 
-    doc.save(safeFileName(job.name)+'.pdf');
+    pdfHeading(c, 'Extras to charge customer');
+    const eTotal = extras.reduce((t,x)=>t+(Number(x.amount)||0),0);
+    const eCust = extras.reduce((t,x)=>t+extraCustomerPrice(x),0);
+    const eDone = extras.filter(x=>x.charged).reduce((t,x)=>t+extraCustomerPrice(x),0);
+    doc.autoTable({
+      startY: c.y, margin:{left:c.m, right:c.m},
+      head:[['Description','Notes','Cost to us','Margin','Charge customer','Charged?','Attachment']],
+      body: extras.length ? extras.map(x=>[
+        x.description||'', x.notes||'-', money(x.amount), quoteMargin(x)+'%', money(extraCustomerPrice(x)),
+        x.charged ? 'CHARGED'+(x.chargedBy?'\n'+x.chargedBy:'')+(x.chargedAt?'\n'+fmtDate(String(x.chargedAt).slice(0,10)):'') : 'NOT YET',
+        x.pdfName||'-'
+      ]) : [['No extras added yet.','','','','','','']],
+      foot: extras.length ? [['Total','', money(eTotal), '', money(eCust), 'Charged '+money(eDone)+'\nLeft to charge '+money(eCust-eDone), '']] : [],
+      styles:{fontSize:8, cellPadding:4}, headStyles:PDF_HEAD,
+      footStyles:{fillColor:[240,240,240], textColor:20, fontStyle:'bold'}, theme:'grid',
+      didParseCell:(d)=>{
+        if(d.section==='body' && extras.length && d.column.index===5){
+          d.cell.styles.fillColor = extras[d.row.index].charged ? [233,244,238] : [255,243,176];
+        }
+      }
+    });
+    doc.save(safeFileName(job.name)+'_money.pdf');
+  }
+
+  function exportTimelinePDF(job){
+    const c = pdfStart(job, 'Timeline'); if(!c) return;
+    const doc = c.doc;
+    const tl = (job.timeline||[]).slice().sort((a,b)=>(a.start||'').localeCompare(b.start||''));
+    pdfHeading(c, 'Trade timeline (current)');
+    doc.autoTable({
+      startY: c.y, margin:{left:c.m, right:c.m},
+      head:[['Trade','Description','Start','End','Status','Original dates','Last altered']],
+      body: tl.length ? tl.map(e=>{
+        const L = tlIsAltered(e) ? tlLast(e) : null;
+        return [e.trade||'', e.description||'-', fmtDate(e.start), fmtDate(e.end)||fmtDate(e.start), e.status||'',
+          e.orig ? tlRange(e.orig)+' ('+e.orig.status+')' : (L ? '-' : 'Unchanged'),
+          L ? 'ALTERED by '+L.by+', '+fmtStamp(L.at)+'\nReason: '+L.reason : 'No'];
+      }) : [['No trades scheduled yet.','','','','','','']],
+      styles:{fontSize:8, cellPadding:4}, headStyles:PDF_HEAD, theme:'grid',
+      didParseCell:(d)=>{
+        if(d.section==='body' && tl.length && tlIsAltered(tl[d.row.index])) d.cell.styles.fillColor = [251,241,226];
+      }
+    });
+    c.y = doc.lastAutoTable.finalY + 26;
+
+    const rows = [];
+    tl.forEach(e=>{ (e.history||[]).forEach(h=>rows.push([e.trade||'', h.by||'', fmtStamp(h.at), h.reason||'',
+      (h.changes||[]).map(x=>x.label+': '+(x.from||'-')+' -> '+(x.to||'-')).join('\n')])); });
+    pdfHeading(c, 'Changes from the original timeline');
+    doc.autoTable({
+      startY: c.y, margin:{left:c.m, right:c.m},
+      head:[['Trade','Changed by','When','Reason','What changed']],
+      body: rows.length ? rows : [['No changes have been made to the original timeline.','','','','']],
+      styles:{fontSize:8, cellPadding:4}, headStyles:PDF_HEAD, theme:'grid'
+    });
+    c.y = doc.lastAutoTable.finalY + 26;
+
+    const rem = job.timelineRemoved || [];
+    if(rem.length){
+      pdfHeading(c, 'Removed from the original timeline');
+      doc.autoTable({
+        startY: c.y, margin:{left:c.m, right:c.m},
+        head:[['Trade','Description','Dates','Status','Removed by','When','Reason']],
+        body: rem.map(r=>[r.trade||'', r.description||'-', tlRange(r), r.status||'', r.removedBy||'', fmtStamp(r.removedAt), r.reason||'']),
+        styles:{fontSize:8, cellPadding:4}, headStyles:PDF_HEAD, theme:'grid'
+      });
+    }
+    doc.save(safeFileName(job.name)+'_timeline.pdf');
   }
 
   // ---------------- Export: Spreadsheet ----------------
@@ -2619,6 +2722,60 @@
     if(currentJobId === job.id) currentJobId = null;
     renderSidebar();
     renderMain();
+  }
+
+  function openInvoiceModal(job, q){
+    openModal(
+      '<div class="modal-head"><h3>Invoiced amount</h3><button class="modal-close" id="mClose">&times;</button></div>'+
+      '<div class="modal-body">'+
+        '<div class="field-hint" style="margin-bottom:8px;"><strong>'+esc(q.description)+'</strong> — quoted '+money(q.amount)+'</div>'+
+        '<div class="field"><label>Actual invoiced amount (NZD)</label><input id="iAmt" type="number" step="0.01" min="0" value="'+(q.invoiced!=null?q.invoiced:'')+'" placeholder="0.00"></div>'+
+        '<div id="iExtra" style="display:none;">'+
+          '<div id="iWarn" style="color:var(--red);font-weight:700;margin-bottom:8px;"></div>'+
+          '<div id="iBelow" style="display:none;margin-bottom:8px;">'+
+            '<label style="display:block;cursor:pointer;margin-bottom:4px;"><input type="checkbox" id="iDisc"> We got a discount</label>'+
+            '<label style="display:block;cursor:pointer;"><input type="checkbox" id="iPart"> They haven\'t invoiced the whole amount yet</label>'+
+          '</div>'+
+          '<div class="field"><label>Reason <span style="color:var(--red);">*</span></label><textarea id="iReason" placeholder="Why doesn\'t it match the quote?">'+esc(q.invoiceReason||'')+'</textarea></div>'+
+        '</div>'+
+        '<div id="iErr" class="field-hint" style="color:var(--red);"></div>'+
+      '</div>'+
+      '<div class="modal-foot"><button class="btn btn-secondary" id="mCancel">Cancel</button>'+(q.invoiced!=null?'<button class="btn btn-secondary" id="iClear">Clear</button>':'')+'<button class="btn btn-primary" id="mSave">Save</button></div>'
+    );
+    const quoted = Math.round((Number(q.amount)||0)*100)/100;
+    const $ = id=>document.getElementById(id);
+    $('iDisc').checked = q.invoiceType==='discount'; $('iPart').checked = q.invoiceType==='partial';
+    $('iDisc').addEventListener('change', ()=>{ if($('iDisc').checked) $('iPart').checked = false; });
+    $('iPart').addEventListener('change', ()=>{ if($('iPart').checked) $('iDisc').checked = false; });
+    function refresh(){
+      const v = $('iAmt').value;
+      const has = v !== '';
+      const diff = has ? Math.round((parseFloat(v)-quoted)*100)/100 : 0;
+      $('iExtra').style.display = (has && diff!==0) ? '' : 'none';
+      $('iBelow').style.display = diff<0 ? '' : 'none';
+      $('iWarn').textContent = diff>0 ? 'This is '+money(diff)+' MORE than quoted.' : diff<0 ? 'This is '+money(-diff)+' LESS than quoted.' : '';
+    }
+    $('iAmt').addEventListener('input', refresh); refresh();
+    $('mClose').addEventListener('click', closeModal); $('mCancel').addEventListener('click', closeModal);
+    if($('iClear')) $('iClear').addEventListener('click', async ()=>{
+      q.invoiced = null; q.invoiceReason = null; q.invoiceType = null; q.invoicedBy = null; q.invoicedAt = null;
+      await saveJob(job); closeModal(); renderMain();
+    });
+    $('mSave').addEventListener('click', async ()=>{
+      const v = $('iAmt').value;
+      if(v === ''){ $('iErr').textContent = 'Enter the invoiced amount (or use Clear).'; return; }
+      const amt = parseFloat(v), diff = Math.round((amt-quoted)*100)/100;
+      let reason = '', type = null;
+      if(diff !== 0){
+        reason = $('iReason').value.trim();
+        if(diff < 0){ type = $('iDisc').checked ? 'discount' : $('iPart').checked ? 'partial' : null;
+          if(!type){ $('iErr').textContent = 'Tick whether this is a discount or not fully invoiced yet.'; return; } }
+        if(!reason){ $('iErr').textContent = 'A reason is required when the invoice doesn\'t match the quote.'; $('iReason').focus(); return; }
+      }
+      q.invoiced = amt; q.invoiceReason = reason || null; q.invoiceType = type;
+      q.invoicedBy = (myRole&&myRole.name)||''; q.invoicedAt = new Date().toISOString();
+      await saveJob(job); closeModal(); renderMain();
+    });
   }
 
   function openQuoteModal(job, item){
