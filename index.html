@@ -323,6 +323,19 @@
   .gantt-tooltip .tt-desc{color:#EDEEF0;margin-bottom:5px;}
   .gantt-tooltip .tt-cost{color:var(--yellow);font-weight:800;}
 
+  .bar-altered{outline:2px dashed #FEE300;outline-offset:1px;}
+  .gantt-ghost{position:absolute;top:4px;height:40px;border:2px dashed var(--steel-soft);border-radius:4px;background:rgba(138,147,156,0.12);pointer-events:none;}
+  .alt-badge{display:inline-block;margin-left:6px;padding:1px 6px;border-radius:3px;background:var(--yellow);color:var(--ink);font-size:9.5px;font-weight:800;letter-spacing:0.04em;vertical-align:middle;}
+  .tl-list-item.altered{background:var(--orange-bg);border-left:4px solid var(--orange);padding-left:10px;}
+  .tl-alt-note{font-size:12px;color:var(--orange);font-weight:700;margin-top:5px;}
+  .tl-alt-orig{font-size:11.5px;color:var(--ink-soft);margin-top:2px;}
+  .tl-hist{margin-top:5px;font-size:11.5px;color:var(--ink-soft);}
+  .tl-hist summary{cursor:pointer;font-weight:700;}
+  .tl-hist div{margin:4px 0 0 12px;}
+  .tl-removed{margin-top:18px;padding-top:12px;border-top:1px dashed var(--line-strong);}
+  .tl-removed h4{margin:0 0 6px;font-size:12px;text-transform:uppercase;letter-spacing:0.06em;color:var(--red);}
+  .tl-removed-item{font-size:12px;color:var(--ink-soft);padding:5px 0;border-bottom:1px solid var(--line);}
+  .owner-tag{display:inline-block;padding:1px 7px;border-radius:3px;background:var(--yellow);font-size:10.5px;font-weight:800;}
   .legend{display:flex;gap:16px;margin-top:16px;flex-wrap:wrap;}
   .legend-item{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--ink-soft);}
   .legend-swatch{width:10px;height:10px;border-radius:2px;}
@@ -709,6 +722,8 @@
   function crewEmailFor(name){
     return slugifyName(name) + CREW_EMAIL_DOMAIN;
   }
+  function isOwnerEmail(e){ return !!e && String(e).toLowerCase() === OWNER_EMAIL.toLowerCase(); }
+  function isOwner(){ return !!(currentUser && isOwnerEmail(currentUser.email)); }
   function isAdminRole(){ return myRole && (myRole.role === 'admin'); }
   function isAdminOrDirector(){ return myRole && (myRole.role === 'admin' || myRole.role === 'director'); }
 
@@ -732,6 +747,10 @@
     if(snap.exists){
       myRole = snap.data();
       myRoleDocId = user.uid;
+      if(isOwnerEmail(user.email) && (myRole.role !== 'admin' || !myRole.email)){
+        myRole.role = 'admin'; myRole.email = user.email;
+        try{ await ref.update({role:'admin', email:user.email}); }catch(e){}
+      }
       return myRole;
     }
     // No role yet. If this is the owner's Google account, make them Admin
@@ -805,13 +824,19 @@
   // see the note we'll talk through about sharing live data next).
   function onSignedIn(){
     const whoEl = document.getElementById('whoAmI');
-    if(whoEl) whoEl.textContent = (myRole.name||'') + ' (' + myRole.role + ')';
+    if(whoEl) whoEl.textContent = (myRole.name||'') + (isOwner() ? ' (owner)' : ' (' + myRole.role + ')');
     const manageCrewBtn = document.getElementById('manageCrewBtn');
     if(manageCrewBtn) manageCrewBtn.style.display = isAdminRole() ? '' : 'none';
-    ['driveIndicator','driveConnectBtn','backupBtn','restoreBtn','newJobBtn'].forEach(id=>{
+    ['backupBtn','restoreBtn','newJobBtn'].forEach(id=>{
       const el = document.getElementById(id);
       if(el) el.style.display = isAdminOrDirector() ? '' : 'none';
     });
+    // Google Drive is linked to the owner's account only.
+    ['driveIndicator','driveConnectBtn'].forEach(id=>{
+      const el = document.getElementById(id);
+      if(el) el.style.display = isOwner() ? '' : 'none';
+    });
+    if(isOwner()) initGoogleAuth();
     init();
     setupLocalMigration();
   }
@@ -852,25 +877,28 @@
       snap.forEach(doc=>{
         const d = doc.data();
         const isMe = doc.id === (currentUser&&currentUser.uid);
+        const isOwnerRow = isOwnerEmail(d.email);
         rows += '<tr>'+
-          '<td>'+esc(d.name||'')+(isMe?' <span class="field-hint">(you)</span>':'')+(d.email?'<div class="field-hint">'+esc(d.email)+'</div>':'')+'</td>'+
-          '<td><select data-role-for="'+doc.id+'" '+(isMe?'disabled':'')+'>'+
+          '<td>'+esc(d.name||'')+(isOwnerRow?' <span class="owner-tag">OWNER</span>':'')+(isMe?' <span class="field-hint">(you)</span>':'')+(d.email?'<div class="field-hint">'+esc(d.email)+'</div>':'')+'</td>'+
+          '<td><select data-role-for="'+doc.id+'" '+((isMe||isOwnerRow)?'disabled':'')+'>'+
             ['worker','director','admin'].map(r=>'<option value="'+r+'"'+(d.role===r?' selected':'')+'>'+r.charAt(0).toUpperCase()+r.slice(1)+'</option>').join('')+
           '</select></td>'+
-          '<td>'+(isMe?'':'<button class="icon-btn" data-remove-crew="'+doc.id+'">Remove</button>')+'</td>'+
+          '<td>'+((isMe||isOwnerRow)?'':'<button class="icon-btn" data-remove-crew="'+doc.id+'">Remove</button>')+'</td>'+
         '</tr>';
       });
       rows += '</tbody></table>';
       el.innerHTML = rows;
       el.querySelectorAll('[data-role-for]').forEach(sel=>{
         sel.addEventListener('change', async ()=>{
-          await db.collection('roles').doc(sel.getAttribute('data-role-for')).update({role:sel.value});
+          try{ await db.collection('roles').doc(sel.getAttribute('data-role-for')).update({role:sel.value}); }
+          catch(e){ alert('Could not change that role: '+(e&&e.message?e.message:e)); renderCrewList(); }
         });
       });
       el.querySelectorAll('[data-remove-crew]').forEach(btn=>{
         btn.addEventListener('click', async ()=>{
           if(!confirm('Remove this person\'s access? They won\'t be able to sign in anymore.')) return;
-          await db.collection('roles').doc(btn.getAttribute('data-remove-crew')).delete();
+          try{ await db.collection('roles').doc(btn.getAttribute('data-remove-crew')).delete(); }
+          catch(e){ alert('Could not remove them: '+(e&&e.message?e.message:e)); }
           renderCrewList();
         });
       });
@@ -943,7 +971,8 @@
   }
 
   function initGoogleAuth(){
-    if(!driveConfigured()) return;
+    if(!isOwner() || !driveConfigured()) return;
+    if(driveTokenClient) return;
     if(!(window.google && google.accounts && google.accounts.oauth2)){
       // Google's script hasn't finished loading yet — try again shortly.
       setTimeout(initGoogleAuth, 300);
@@ -951,6 +980,7 @@
     }
     driveTokenClient = google.accounts.oauth2.initTokenClient({
       client_id: GOOGLE_CLIENT_ID,
+      login_hint: OWNER_EMAIL,
       scope: DRIVE_SCOPES,
       callback: (resp) => {
         if(resp.error){
@@ -962,6 +992,7 @@
         driveConnected = true;
         try{ localStorage.setItem(DRIVE_EVER_CONNECTED_KEY, '1'); }catch(e){}
         setDriveStatus('connected', 'Drive: connected');
+        verifyDriveAccount().then(ok=>{ if(ok) processUploadQueue(); });
       }
     });
     attemptSilentDriveReconnect();
@@ -985,8 +1016,26 @@
       driveTokenExpiresAt = Date.now() + ((resp.expires_in||3600)*1000) - 60000;
       driveConnected = true;
       setDriveStatus('connected', 'Drive: connected');
+      verifyDriveAccount().then(ok=>{ if(ok) processUploadQueue(); });
     };
     driveTokenClient.requestAccessToken({prompt:''});
+  }
+
+  // Only the owner's Google account may be linked. If any other account gets
+  // picked in the Google popup, the token is revoked straight away.
+  async function verifyDriveAccount(){
+    try{
+      const r = await fetch('https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)', {headers:{Authorization:'Bearer '+driveAccessToken}});
+      const j = await r.json();
+      const email = j && j.user && j.user.emailAddress;
+      if(isOwnerEmail(email)) return true;
+      try{ google.accounts.oauth2.revoke(driveAccessToken, ()=>{}); }catch(e){}
+      driveAccessToken = null; driveConnected = false;
+      try{ localStorage.removeItem(DRIVE_EVER_CONNECTED_KEY); }catch(e){}
+      setDriveStatus('error', 'Drive: wrong account');
+      alert('Only '+OWNER_EMAIL+' can be linked to Drive. Please click Connect Drive and choose that account.');
+      return false;
+    }catch(e){ console.error('Drive account check failed', e); return true; }
   }
 
 
@@ -1020,7 +1069,7 @@
         driveConnected = true;
         try{ localStorage.setItem(DRIVE_EVER_CONNECTED_KEY, '1'); }catch(e){}
         setDriveStatus('connected', 'Drive: connected');
-        resolve(true);
+        verifyDriveAccount().then(ok=>resolve(!!ok));
       };
       driveTokenClient.requestAccessToken({prompt:''});
     });
@@ -1299,6 +1348,7 @@
     });
   }
   function openPdfDataUri(dataUri, filename){
+    if(/^pending:/.test(dataUri||'')){ alert('This file is still being filed into the owner\'s Google Drive. It will open once the owner\'s app has processed it.'); return; }
     if(/^https?:/i.test(dataUri)){ window.open(dataUri, '_blank'); return; }
     try{
       const parts = dataUri.split(',');
@@ -1353,12 +1403,14 @@
   const isDataUri = v => typeof v === 'string' && v.indexOf('data:') === 0;
 
   function stopCloudSync(){
+    stopQueueWatcher();
     if(unsubJobs){ unsubJobs(); unsubJobs = null; }
     if(unsubFin){ unsubFin(); unsubFin = null; }
     jobs = {}; jobIndex = []; currentJobId = null;
   }
   function startCloudSync(){
     stopCloudSync();
+    startQueueWatcher();
     let first = true;
     unsubJobs = db.collection('jobs').onSnapshot(snap=>{
       jobIndex = snap.docs.map(d=>indexEntryFromJob(Object.assign({id:d.id}, d.data()))).sort((a,b)=> a.id<b.id ? -1 : 1);
@@ -1403,6 +1455,7 @@
 
   // Upload any freshly attached files to Drive and swap the file data for a Drive link.
   async function externalizeFiles(job){
+    if(!isOwner()) return stageFilesForOwner(job);
     const items = [];
     (job.plans||[]).forEach(p=>{ if(isDataUri(p.fileData)) items.push({o:p, k:'fileData', n:p.name||'plan', f:'drivePlansFolderId'}); });
     (job.quotes||[]).forEach(q=>{ if(isDataUri(q.pdfData)) items.push({o:q, k:'pdfData', n:q.pdfName||'quote', f:'driveQuotesFolderId'}); });
@@ -1420,6 +1473,101 @@
         it.o[it.k] = up.webViewLink || ('https://drive.google.com/file/d/'+up.id+'/view');
       }
     }catch(e){ console.error('Drive upload failed', e); }
+  }
+
+  // ---- Upload queue: everyone except the owner stages files here; the owner's
+  // signed-in session moves them into the owner's Google Drive. ----
+  const QUEUE_COLL = 'uploadQueue';
+  const CHUNK_CHARS = 700000;
+  const MAX_FILE_CHARS = 12000000;
+  async function stageFilesForOwner(job){
+    const items = [];
+    (job.plans||[]).forEach(p=>{ if(isDataUri(p.fileData)) items.push({o:p, k:'fileData', n:p.name||'plan', kind:'plan'}); });
+    (job.quotes||[]).forEach(q=>{ if(isDataUri(q.pdfData)) items.push({o:q, k:'pdfData', n:q.pdfName||'quote', kind:'quote'}); });
+    (job.extras||[]).forEach(x=>{ if(isDataUri(x.pdfData)) items.push({o:x, k:'pdfData', n:x.pdfName||'extra', kind:'extra'}); });
+    for(const it of items){
+      const data = it.o[it.k];
+      if(data.length > MAX_FILE_CHARS) continue; // too big — stripUnsavedFiles will report it
+      try{
+        const qref = db.collection(QUEUE_COLL).doc(uid());
+        const n = Math.ceil(data.length / CHUNK_CHARS);
+        await qref.set({jobId:job.id, jobName:job.name||'', kind:it.kind, itemId:it.o.id, name:it.n, chunks:n,
+          status:'writing', by:(myRole&&myRole.name)||'', byUid:currentUser.uid, createdAt:firebase.firestore.FieldValue.serverTimestamp()});
+        for(let i=0;i<n;i++) await qref.collection('chunks').doc(String(i)).set({i, data:data.slice(i*CHUNK_CHARS,(i+1)*CHUNK_CHARS)});
+        await qref.update({status:'pending'});
+        it.o[it.k] = 'pending:'+qref.id;
+      }catch(e){ console.error('Could not stage upload', e); }
+    }
+  }
+  let queueBusy = false, unsubQueue = null, queueTimer = null;
+  function startQueueWatcher(){
+    if(!isOwner() || unsubQueue) return;
+    unsubQueue = db.collection(QUEUE_COLL).where('status','==','pending').onSnapshot(()=>processUploadQueue(), e=>console.error(e));
+    queueTimer = setInterval(processUploadQueue, 20000);
+  }
+  function stopQueueWatcher(){
+    if(unsubQueue){ unsubQueue(); unsubQueue = null; }
+    if(queueTimer){ clearInterval(queueTimer); queueTimer = null; }
+  }
+  async function processUploadQueue(){
+    if(queueBusy || !isOwner() || !driveConnected) return;
+    queueBusy = true;
+    try{
+      const snap = await db.collection(QUEUE_COLL).where('status','==','pending').get();
+      for(const qd of snap.docs){
+        if(!(await ensureDriveToken())) break;
+        const q = qd.data();
+        try{
+          const got = await db.runTransaction(async tx=>{
+            const f = await tx.get(qd.ref);
+            if(!f.exists || f.data().status !== 'pending') return false;
+            tx.update(qd.ref, {status:'processing'}); return true;
+          });
+          if(!got) continue;
+          setDriveStatus('syncing', 'Drive: filing '+(q.name||'upload')+'…');
+          const cs = await qd.ref.collection('chunks').get();
+          const parts = cs.docs.map(d=>d.data()).sort((a,b)=>a.i-b.i);
+          if(parts.length !== q.chunks) throw new Error('chunks incomplete');
+          const dataUri = parts.map(p=>p.data).join('');
+          const jobDoc = await db.collection('jobs').doc(q.jobId).get();
+          if(!jobDoc.exists){ await qd.ref.update({status:'failed'}); continue; }
+          const job = Object.assign({}, jobDoc.data(), {id:q.jobId});
+          await ensureJobFolders(job);
+          await db.collection('jobs').doc(q.jobId).update({driveFolderId:job.driveFolderId, driveFolderUrl:job.driveFolderUrl,
+            drivePlansFolderId:job.drivePlansFolderId, driveQuotesFolderId:job.driveQuotesFolderId, driveExtrasFolderId:job.driveExtrasFolderId});
+          const folder = q.kind==='plan' ? job.drivePlansFolderId : q.kind==='quote' ? job.driveQuotesFolderId : job.driveExtrasFolderId;
+          const up = await driveUploadFile(dataUri, q.name, folder);
+          await driveFetch('https://www.googleapis.com/drive/v3/files/'+up.id+'/permissions', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({role:'reader', type:'anyone'})});
+          const link = up.webViewLink || ('https://drive.google.com/file/d/'+up.id+'/view');
+          const marker = 'pending:'+qd.id;
+          if(q.kind === 'plan'){
+            await db.runTransaction(async tx=>{
+              const r = db.collection('jobs').doc(q.jobId); const d = await tx.get(r);
+              const plans = (d.data().plans||[]).map(p=> p.id===q.itemId && p.fileData===marker ? Object.assign({}, p, {fileData:link}) : p);
+              tx.update(r, {plans});
+            });
+          } else if(q.kind === 'quote'){
+            await db.runTransaction(async tx=>{
+              const r = db.collection(FINANCE_COLL).doc(q.jobId); const d = await tx.get(r);
+              if(!d.exists) return;
+              const quotes = (d.data().quotes||[]).map(x=> x.id===q.itemId && x.pdfData===marker ? Object.assign({}, x, {pdfData:link}) : x);
+              tx.update(r, {quotes});
+            });
+          } else {
+            await db.collection(FINANCE_COLL).doc(q.jobId).update({['extras.'+q.itemId+'.pdfData']: link});
+          }
+          delete jobs[q.jobId];
+          for(const c of cs.docs) await c.ref.delete();
+          await qd.ref.delete();
+          if(currentJobId === q.jobId && !document.getElementById('mSave')) renderMain();
+        }catch(e){
+          console.error('Queue item failed', e);
+          try{ await qd.ref.update({status:'pending'}); }catch(_){}
+          break;
+        }
+      }
+      setDriveStatus('connected', 'Drive: connected');
+    }finally{ queueBusy = false; }
   }
 
   // Anything still holding raw file data couldn't reach Drive — drop it from the shared copy.
@@ -1477,7 +1625,7 @@
       if(isAdminOrDirector()) writes.push(db.collection(FINANCE_COLL).doc(job.id).set(parts.fin));
       await Promise.all(writes);
       setSaving(false, true);
-      if(lost) alert(lost+' file(s) could not be saved because they couldn\'t be uploaded to Google Drive.\n\nUploads need the Drive owner\'s Google account connected (use "Connect Drive"). Please re-attach the file(s).');
+      if(lost) alert(lost+' file(s) could not be saved because they couldn\'t be uploaded to Google Drive.\n\nFiles must be under about 9 MB, or the owner\'s Google Drive must be connected. Please re-attach the file(s).');
       return true;
     }catch(e){
       console.error(e);
@@ -2040,6 +2188,12 @@
   const DAY_WIDTH = 42; // px per day column
   const DAY_MS = 24*60*60*1000;
 
+  const TL_FIELDS = [['trade','Trade'],['description','Description'],['start','Start'],['end','End'],['status','Status']];
+  function tlSnap(e){ return {trade:e.trade||'', description:e.description||'', start:e.start||'', end:e.end||'', status:e.status||''}; }
+  function tlIsAltered(e){ return !!(e.history && e.history.length); }
+  function tlLast(e){ return e.history[e.history.length-1]; }
+  function fmtStamp(iso){ try{ return new Date(iso).toLocaleString(undefined,{day:'numeric',month:'short',year:'numeric',hour:'numeric',minute:'2-digit'}); }catch(x){ return iso||''; } }
+  function tlRange(o){ return fmtDate(o.start)+(o.end && o.end!==o.start ? ' – '+fmtDate(o.end) : ''); }
   function sameDate(a,b){ return a.getFullYear()===b.getFullYear() && a.getMonth()===b.getMonth() && a.getDate()===b.getDate(); }
 
   function getTradeCost(job, tradeName){
@@ -2076,6 +2230,7 @@
       '<div class="tt-title">'+esc(e.trade)+'</div>'+
       '<div class="tt-dates">'+dateStr+'</div>'+
       '<div class="tt-desc">'+(e.description ? esc(e.description) : 'No description added')+'</div>'+
+      (tlIsAltered(e) ? '<div class="tt-desc" style="color:#FEE300;">✎ Altered by '+esc(tlLast(e).by)+' — '+esc(tlLast(e).reason)+(e.orig?'<br>Original: '+tlRange(e.orig):'')+'</div>' : '')+
       (isAdminOrDirector() ? '<div class="tt-cost">'+costLine+'</div>' : '');
     tip.style.display = 'block';
     const rect = barEl.getBoundingClientRect();
@@ -2098,8 +2253,8 @@
     if(entries.length === 0){
       ganttHtml = '<div class="panel-empty"><strong>No trades scheduled yet</strong>Add trades with their dates and a description of the work to build the timeline.</div>';
     } else {
-      const starts = entries.map(e=>e.start).filter(Boolean);
-      const ends = entries.map(e=>e.end||e.start).filter(Boolean);
+      const starts = entries.map(e=>e.start).concat(entries.map(e=>e.orig&&e.orig.start)).filter(Boolean);
+      const ends = entries.map(e=>e.end||e.start).concat(entries.map(e=>e.orig&&(e.orig.end||e.orig.start))).filter(Boolean);
       const today = new Date(); today.setHours(0,0,0,0);
       // Always include today in the range, even if no trade is scheduled
       // on/around it — otherwise there's no column left to highlight.
@@ -2132,11 +2287,16 @@
         const spanDays = Math.max(1, Math.round((en-s)/DAY_MS)+1);
         const left = daysFromStart*DAY_WIDTH + 2;
         const width = spanDays*DAY_WIDTH - 4;
-        const cls = TL_BAR_CLASS[e.status] || 'bar-scheduled';
+        const cls = (TL_BAR_CLASS[e.status] || 'bar-scheduled') + (tlIsAltered(e) ? ' bar-altered' : '');
+        let ghost = '';
+        if(tlIsAltered(e) && e.orig && (e.orig.start!==e.start || (e.orig.end||e.orig.start)!==(e.end||e.start))){
+          const os = new Date(e.orig.start+'T00:00:00'), oe = new Date((e.orig.end||e.orig.start)+'T00:00:00');
+          ghost = '<div class="gantt-ghost" title="Original dates" style="left:'+(Math.round((os-minD)/DAY_MS)*DAY_WIDTH+1)+'px;width:'+(Math.max(1,Math.round((oe-os)/DAY_MS)+1)*DAY_WIDTH-2)+'px"></div>';
+        }
         return '<div class="gantt-row">'+
-          '<div class="gantt-label"><div class="trade">'+esc(e.trade)+'</div>'+(e.description?'<div class="desc">'+esc(e.description)+'</div>':'')+'</div>'+
+          '<div class="gantt-label"><div class="trade">'+esc(e.trade)+(tlIsAltered(e)?'<span class="alt-badge">ALTERED</span>':'')+'</div>'+(e.description?'<div class="desc">'+esc(e.description)+'</div>':'')+'</div>'+
           '<div class="gantt-track" style="width:'+totalWidth+'px">'+
-            '<div class="gantt-grid">'+dayCellsGrid+'</div>'+
+            '<div class="gantt-grid">'+dayCellsGrid+'</div>'+ghost+
             '<div class="gantt-bar '+cls+'" style="left:'+left+'px;width:'+width+'px" data-edit="'+e.id+'" data-hover="'+e.id+'">'+esc(e.trade)+'</div>'+
           '</div>'+
         '</div>';
@@ -2150,6 +2310,8 @@
         '<div class="legend">'+
           legendItem('bar-scheduled','Scheduled')+legendItem('bar-progress','In progress')+
           legendItem('bar-complete','Complete')+legendItem('bar-delayed','Delayed')+
+          '<div class="legend-item"><span class="legend-swatch" style="outline:2px dashed #FEE300;background:var(--blue)"></span>Altered from original</div>'+
+          '<div class="legend-item"><span class="legend-swatch" style="border:2px dashed var(--steel-soft)"></span>Original dates</div>'+
         '</div>';
     }
 
@@ -2161,11 +2323,20 @@
         costStr = ' · '+money(info.amount);
         if(info.customer!==null && info.customer!==undefined) costStr += ' (charge '+money(info.customer)+')';
       }
-      return '<div class="tl-list-item">'+
+      let altHtml = '';
+      if(tlIsAltered(e)){
+        const L = tlLast(e);
+        altHtml = '<div class="tl-alt-note">✎ Altered by '+esc(L.by)+' · '+esc(fmtStamp(L.at))+' — “'+esc(L.reason)+'”</div>'+
+          (e.orig ? '<div class="tl-alt-orig">Original: '+tlRange(e.orig)+' · '+esc(e.orig.status)+'</div>' : '')+
+          (e.history.length>1 ? '<details class="tl-hist"><summary>Full change history ('+e.history.length+')</summary>'+
+            e.history.slice().reverse().map(h=>'<div><strong>'+esc(h.by)+'</strong> · '+esc(fmtStamp(h.at))+' — '+esc(h.reason)+'<br>'+
+              (h.changes||[]).map(c=>esc(c.label)+': '+esc(c.from||'—')+' → '+esc(c.to||'—')).join('; ')+'</div>').join('')+'</details>' : '');
+      }
+      return '<div class="tl-list-item'+(tlIsAltered(e)?' altered':'')+'">'+
         '<div class="tl-left"><div class="tl-swatch '+cls+'"></div>'+
-          '<div><div class="tl-trade">'+esc(e.trade)+'</div>'+
+          '<div><div class="tl-trade">'+esc(e.trade)+(tlIsAltered(e)?'<span class="alt-badge">ALTERED</span>':'')+'</div>'+
           (e.description ? '<div class="tl-desc">'+esc(e.description)+'</div>' : '')+
-          '<div class="tl-dates">'+fmtDate(e.start)+(e.end && e.end!==e.start ? ' – '+fmtDate(e.end) : '')+' · '+esc(e.status)+costStr+'</div></div>'+
+          '<div class="tl-dates">'+fmtDate(e.start)+(e.end && e.end!==e.start ? ' – '+fmtDate(e.end) : '')+' · '+esc(e.status)+costStr+'</div>'+altHtml+'</div>'+
         '</div>'+
         '<div class="row-actions"><button class="icon-btn" data-edit2="'+e.id+'">Edit</button><button class="icon-btn" data-del2="'+e.id+'">Remove</button></div>'+
       '</div>';
@@ -2176,6 +2347,8 @@
         '<div class="panel-head"><h3>Trade timeline</h3><button class="btn btn-primary btn-sm" id="addTlBtn">+ Add trade</button></div>'+
         ganttHtml+
         (listHtml ? '<div class="tl-list">'+listHtml+'</div>' : '')+
+        ((job.timelineRemoved||[]).length ? '<div class="tl-removed"><h4>Removed from original timeline</h4>'+
+          job.timelineRemoved.slice().reverse().map(r=>'<div class="tl-removed-item"><strong>'+esc(r.trade)+'</strong> ('+tlRange(r)+') — removed by '+esc(r.removedBy)+' · '+esc(fmtStamp(r.removedAt))+' — “'+esc(r.reason)+'”</div>').join('')+'</div>' : '')+
       '</div>';
 
     document.getElementById('addTlBtn').addEventListener('click', ()=>openTimelineModal(job, null));
@@ -2209,8 +2382,13 @@
     });
     container.querySelectorAll('[data-del2]').forEach(el=>{
       el.addEventListener('click', async ()=>{
-        if(!confirm('Remove this trade from the timeline?')) return;
-        job.timeline = job.timeline.filter(x=>x.id!==el.getAttribute('data-del2'));
+        const victim = job.timeline.find(x=>x.id===el.getAttribute('data-del2'));
+        if(!victim) return;
+        const why = (prompt('Why is "'+victim.trade+'" being removed from the timeline? (required)') || '').trim();
+        if(!why){ alert('A reason is required to remove a trade from the timeline.'); return; }
+        job.timelineRemoved = job.timelineRemoved || [];
+        job.timelineRemoved.push(Object.assign({}, tlSnap(victim), {id:victim.id, removedBy:(myRole&&myRole.name)||'Unknown', removedAt:new Date().toISOString(), reason:why}));
+        job.timeline = job.timeline.filter(x=>x.id!==victim.id);
         await saveJob(job);
         renderMain();
         if(job.driveSheetId) pushTimelineToSheet(job);
@@ -2555,6 +2733,8 @@
           '<div class="field"><label>End date</label><input id="tEnd" type="date" value="'+(item?item.end:'')+'"></div>'+
         '</div>'+
         '<div class="field"><label>Status</label><select id="tStatus">'+statusOpts+'</select></div>'+
+        (isEdit ? '<div class="field"><label>Reason for change <span style="color:var(--red);">*</span></label><textarea id="tReason" placeholder="Required if you change the trade, dates, status or description — e.g. Rain delay, client change"></textarea>'+
+          '<div class="field-hint">Your name and this reason are recorded on the timeline.</div></div>' : '')+
         (isAdminOrDirector() ? '<div class="field"><label>Linked quote</label><select id="tQuote">'+quoteOpts+'</select>'+
           '<div class="field-hint">Link this trade to a quote so its cost shows on the timeline, even if the trade name spelling differs.</div></div>' : '')+
       '</div>'+
@@ -2581,8 +2761,25 @@
         quoteId
       };
       job.timeline = job.timeline || [];
-      if(isEdit){ Object.assign(item, data); }
-      else { data.id = uid(); job.timeline.push(data); }
+      if(isEdit){
+        const before = tlSnap(item), after = tlSnap(data);
+        const changes = TL_FIELDS.filter(f=>before[f[0]]!==after[f[0]]).map(f=>({field:f[0], label:f[1], from:before[f[0]], to:after[f[0]]}));
+        if(changes.length){
+          const reasonEl = document.getElementById('tReason');
+          const reason = reasonEl ? reasonEl.value.trim() : '';
+          if(!reason){ if(reasonEl){ reasonEl.focus(); reasonEl.style.outline = '2px solid var(--red)'; } return; }
+          if(!item.orig) item.orig = before; // older entries: what they were before this first edit counts as original
+          item.history = item.history || [];
+          item.history.push({by:(myRole&&myRole.name)||'Unknown', byUid:(currentUser&&currentUser.uid)||'', at:new Date().toISOString(), reason, changes});
+        }
+        Object.assign(item, data);
+      }
+      else {
+        data.id = uid();
+        data.orig = tlSnap(data);
+        data.addedBy = (myRole&&myRole.name)||'Unknown'; data.addedAt = new Date().toISOString();
+        job.timeline.push(data);
+      }
       await saveJob(job);
       closeModal();
       renderMain();
